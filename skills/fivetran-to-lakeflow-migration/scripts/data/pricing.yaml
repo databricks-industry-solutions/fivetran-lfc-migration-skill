@@ -1,0 +1,88 @@
+# Cost assumptions for the Fivetran vs Lakeflow Connect comparison.
+#
+# READ THIS BEFORE QUOTING ANY NUMBER FROM THIS FILE.
+#
+# Every value below is a placeholder starting point, not a verified rate. Both
+# vendors price by consumption against negotiated contracts, so list rates are a
+# poor proxy for what a specific customer pays. Replace these with measured
+# inputs before showing a customer anything:
+#
+#   Fivetran side  -> ask for the invoice or contract value, pass it as
+#                     --fivetran-annual-cost. This single input removes most of
+#                     the uncertainty.
+#   Databricks side -> query the customer's own account:
+#
+#     SELECT sku_name, pricing.default AS usd_per_dbu
+#     FROM system.billing.list_prices
+#     WHERE sku_name ILIKE '%INGEST%' OR sku_name ILIKE '%DLT%'
+#     QUALIFY ROW_NUMBER() OVER (PARTITION BY sku_name ORDER BY price_start_time DESC) = 1
+#
+#   and, if they already run any Lakeflow Connect pipelines, measure actual
+#   spend and pass it as --lfc-actual-monthly-cost.
+version: 1
+last_reviewed: '2026-08-24'
+verified: false
+
+fivetran:
+  # Fivetran bills Monthly Active Rows: the count of distinct primary keys
+  # inserted, updated, or deleted per table per month. The marginal rate declines
+  # as volume grows.
+  #
+  # These tiers are illustrative only. Fivetran does not publish a complete rate
+  # card, and real contracts are negotiated.
+  mar_tiers:
+    - up_to_mar: 1000000
+      usd_per_1k_mar: 2.00
+    - up_to_mar: 10000000
+      usd_per_1k_mar: 1.00
+    - up_to_mar: 50000000
+      usd_per_1k_mar: 0.50
+    - up_to_mar: null # everything above the previous tier
+      usd_per_1k_mar: 0.25
+
+  # Observed range of discount off list on negotiated contracts, as a fraction.
+  # Used to widen the modelled Fivetran range. Purely a modelling assumption.
+  typical_discount_range: [0.20, 0.60]
+
+  notes:
+    - MAR counts a row once per month no matter how many times it changes, so
+      high-frequency syncs of a stable table are cheap and a churny table is
+      expensive. Sync frequency alone is a weak predictor of Fivetran cost.
+    - Fivetran plans carry platform fees and minimum commits that do not scale
+      down proportionally when connectors are removed. Partial migrations often
+      save less than the MAR reduction implies.
+
+lakeflow_connect:
+  # Blended USD per DBU for serverless managed ingestion. Replace with the
+  # customer's actual rate from system.billing.list_prices.
+  usd_per_dbu: 0.40
+
+  # Fixed DBU overhead per ingestion pipeline update, independent of table count.
+  dbu_per_pipeline_run: 0.10
+
+  # Additional DBUs per table per update. Scales with table count but NOT with
+  # data volume, which is the model's biggest simplification.
+  dbu_per_table_per_run: 0.02
+
+  # An ingestion gateway runs continuously on classic compute, so it bills for
+  # roughly 730 hours a month whether or not the source is busy. For sources
+  # that need a gateway this is frequently the dominant cost.
+  gateway_dbu_per_hour: 1.50
+
+  # Pipeline updates per month treated as equivalent to continuous operation.
+  continuous_equivalent_runs_per_month: 2920
+
+  # Fraction applied above and below the base estimate to produce the low/high
+  # bounds. 0.6 is deliberately wide: DBU consumption tracks data volume and
+  # change rate, and the Fivetran inventory exposes neither.
+  estimate_spread: 0.6
+
+  notes:
+    - Ingestion pipelines run on serverless compute. Ingestion gateways run on
+      classic compute and must run continuously.
+    - Billed usage appears in system.billing.usage. Filter on
+      billing_origin_product and sku_name to separate managed ingestion from
+      Lakeflow Declarative Pipelines DBUs.
+    - This model ignores data volume entirely. It is useful for ranking
+      connections by likely cost and for sanity-checking order of magnitude,
+      not for producing a quote.

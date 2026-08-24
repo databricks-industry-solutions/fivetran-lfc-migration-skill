@@ -1,0 +1,166 @@
+{
+  "schema_version": "1",
+  "generated_at": "2026-08-24T19:00:00+00:00",
+  "source": "fivetran-api",
+  "account": {
+    "account_id": "acme_analytics",
+    "account_name": "Acme Analytics",
+    "key_type": "system",
+    "coverage_complete": true
+  },
+  "groups": [
+    {
+      "id": "schoolmaster_heedless",
+      "name": "Production",
+      "destination": {
+        "id": "schoolmaster_heedless",
+        "service": "snowflake",
+        "region": "AWS_US_EAST_1",
+        "setup_status": "CONNECTED",
+        "networking_method": "Directly",
+        "config": {"host": "acme.snowflakecomputing.com", "database": "ANALYTICS"}
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "speak_inexpensive",
+      "group_id": "schoolmaster_heedless",
+      "service": "salesforce",
+      "destination_schema": "salesforce",
+      "paused": false,
+      "sync_frequency_minutes": 360,
+      "schedule_type": "auto",
+      "networking_method": "Directly",
+      "status": {"setup_state": "connected", "sync_state": "scheduled"},
+      "config": {"instance_url": "https://acme.my.salesforce.com"},
+      "schema_change_handling": "ALLOW_COLUMNS",
+      "objects": [
+        {
+          "source_schema": "salesforce",
+          "source_table": "Account",
+          "destination_schema": "salesforce",
+          "destination_table": "account",
+          "schema_enabled": true,
+          "enabled": true,
+          "sync_mode": "HISTORY",
+          "retains_history": true,
+          "supports_history_mode": true,
+          "supports_columns_config": true,
+          "columns_complete": true,
+          "primary_keys": ["Id"],
+          "primary_keys_known": true,
+          "hashed_columns": [],
+          "excluded_columns": ["AnnualRevenue"]
+        },
+        {
+          "source_schema": "salesforce",
+          "source_table": "Contact",
+          "destination_schema": "salesforce",
+          "destination_table": "contact",
+          "schema_enabled": true,
+          "enabled": true,
+          "sync_mode": "SOFT_DELETE",
+          "retains_history": false,
+          "supports_history_mode": true,
+          "supports_columns_config": true,
+          "columns_complete": true,
+          "primary_keys": ["Id"],
+          "primary_keys_known": true,
+          "hashed_columns": ["Email"],
+          "excluded_columns": []
+        }
+      ],
+      "counts": {"tables_enabled": 2, "tables_history_mode": 1}
+    },
+    {
+      "id": "steadfast_pothole",
+      "group_id": "schoolmaster_heedless",
+      "service": "sql_server_rds",
+      "destination_schema": "erp",
+      "paused": false,
+      "sync_frequency_minutes": 30,
+      "schedule_type": "auto",
+      "networking_method": "PrivateLink",
+      "status": {"setup_state": "connected", "sync_state": "scheduled"},
+      "config": {"host": "erp.example.internal", "database": "ERPProd"},
+      "schema_change_handling": "ALLOW_ALL",
+      "objects": [
+        {
+          "source_schema": "dbo",
+          "source_table": "Orders",
+          "destination_schema": "erp",
+          "destination_table": "orders",
+          "schema_enabled": true,
+          "enabled": true,
+          "sync_mode": "SOFT_DELETE",
+          "retains_history": false,
+          "supports_columns_config": true,
+          "columns_complete": false,
+          "primary_keys": [],
+          "primary_keys_known": false,
+          "hashed_columns": [],
+          "excluded_columns": []
+        }
+      ],
+      "counts": {"tables_enabled": 1, "tables_history_mode": 0}
+    },
+    {
+      "id": "brittle_marmalade",
+      "group_id": "schoolmaster_heedless",
+      "service": "hubspot",
+      "destination_schema": "hubspot",
+      "paused": false,
+      "sync_frequency_minutes": 1440,
+      "networking_method": "Directly",
+      "status": {"setup_state": "connected", "sync_state": "scheduled"},
+      "config": {},
+      "objects": [
+        {
+          "source_schema": "hubspot",
+          "source_table": "deals",
+          "destination_schema": "hubspot",
+          "destination_table": "deals",
+          "schema_enabled": true,
+          "enabled": true,
+          "retains_history": false,
+          "supports_columns_config": true,
+          "columns_complete": true,
+          "primary_keys": ["id"],
+          "primary_keys_known": true,
+          "hashed_columns": [],
+          "excluded_columns": []
+        }
+      ],
+      "counts": {"tables_enabled": 1, "tables_history_mode": 0}
+    },
+    {
+      "id": "gilded_walrus",
+      "group_id": "schoolmaster_heedless",
+      "service": "s3",
+      "destination_schema": "raw_files",
+      "paused": false,
+      "sync_frequency_minutes": 60,
+      "networking_method": "Directly",
+      "status": {"setup_state": "connected", "sync_state": "scheduled"},
+      "config": {"bucket": "acme-raw"},
+      "objects": [],
+      "counts": {}
+    }
+  ],
+  "transformations": [],
+  "summary": {
+    "connections_total": 4,
+    "connections_active": 4,
+    "connections_paused": 0,
+    "connections_broken": 0,
+    "distinct_services": 4,
+    "connections_by_service": {"salesforce": 1, "sql_server_rds": 1, "hubspot": 1, "s3": 1},
+    "tables_enabled": 4,
+    "tables_history_mode": 1,
+    "tables_primary_keys_unknown": 1,
+    "columns_hashed": 1,
+    "non_direct_networking": 1
+  },
+  "warnings": []
+}

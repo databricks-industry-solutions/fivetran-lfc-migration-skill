@@ -146,6 +146,105 @@ def _describe_columns(obj: dict[str, Any]) -> str:
     return "all"
 
 
+def render_billing_report(comparison: dict[str, Any]) -> str:
+    fivetran = comparison["fivetran"]
+    lakeflow = comparison["lakeflow_connect"]
+    lines = [
+        "# Fivetran vs Lakeflow Connect cost comparison",
+        "",
+        f"Generated: {comparison['generated_at']}",
+        f"Pricing assumptions last reviewed: "
+        f"{comparison.get('pricing_last_reviewed') or 'unknown'}",
+        "",
+        f"**Confidence: {comparison['confidence']}.** {comparison['confidence_note']}",
+        "",
+        "## Inputs",
+        "",
+        "| Side | Basis | Source |",
+        "|---|---|---|",
+        f"| Fivetran | {fivetran['basis']} | {fivetran['source'] or 'not established'} |",
+        f"| Lakeflow Connect | {lakeflow['basis']} | {lakeflow['source'] or 'not established'} |",
+        "",
+        f"- Fivetran: {fivetran['detail']}",
+        f"- Lakeflow Connect: {lakeflow['detail']}",
+        "",
+    ]
+
+    if comparison["scenarios"]:
+        lines.extend(
+            [
+                "## Scenarios",
+                "",
+                "| Scenario | Fivetran / month | Lakeflow Connect / month "
+                "| Monthly delta | Annual delta |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for scenario in comparison["scenarios"]:
+            lines.append(
+                "| {label} | {ft} | {lfc} | {monthly} | {annual} |".format(
+                    label=scenario["scenario"].replace("_", " "),
+                    ft=_money(scenario["fivetran_monthly"]),
+                    lfc=_money(scenario["lakeflow_monthly"]),
+                    monthly=_signed_money(scenario["monthly_savings"]),
+                    annual=_signed_money(scenario["annual_savings"]),
+                )
+            )
+        lines.append("")
+        lines.append("A positive delta means migrating costs less.")
+        lines.append("")
+    else:
+        lines.extend(
+            [
+                "## Scenarios",
+                "",
+                "Not enough input to compare. Supply the missing side and re-run.",
+                "",
+            ]
+        )
+
+    if lakeflow.get("components"):
+        lines.extend(
+            [
+                "## Modelled Lakeflow Connect cost by pipeline",
+                "",
+                "| Pipeline | Source | Tables | Schedule | Runs/month | Gateway "
+                "| Low | Base | High |",
+                "|---|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        for component in lakeflow["components"]:
+            lines.append(
+                "| `{pipeline}` | `{service}` | {tables} | {mode} | {runs} | {gw} "
+                "| {low} | {base} | {high} |".format(
+                    pipeline=component["pipeline_name"],
+                    service=component["fivetran_service"],
+                    tables=component["tables"],
+                    mode=component["schedule_mode"],
+                    runs=component["runs_per_month"],
+                    gw="yes" if component["requires_gateway"] else "no",
+                    low=_money(component["cost_low"]),
+                    base=_money(component["cost_base"]),
+                    high=_money(component["cost_high"]),
+                )
+            )
+        lines.append("")
+
+    lines.extend(["## Caveats", ""])
+    lines.extend(f"- {caveat}" for caveat in comparison["caveats"])
+    return "\n".join(lines) + "\n"
+
+
+def _money(value: float | None) -> str:
+    return "-" if value is None else f"${value:,.0f}"
+
+
+def _signed_money(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{'+' if value >= 0 else '-'}${abs(value):,.0f}"
+
+
 def render_discovery_report(inventory: dict[str, Any]) -> str:
     summary = inventory["summary"]
     lines = [

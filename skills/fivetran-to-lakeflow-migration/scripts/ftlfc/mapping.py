@@ -1,8 +1,10 @@
-"""Translate a Fivetran inventory into a Lakeflow Connect migration plan.
+"""Turn a Fivetran inventory into a Lakeflow Connect migration plan.
 
-The plan is the reviewable middle artifact: a human (or the agent, with the
-customer) edits it before any Databricks resource is generated. Nothing here
-calls an API.
+The plan is the decision artifact: for every Fivetran connection it records the
+target Lakeflow Connect shape, everything that has to happen first, and every
+reason the migration might not be faithful. It is deliberately conservative --
+where the inventory is uncertain, the plan says so rather than guessing, because
+a silently wrong pipeline is worse than a flagged gap.
 """
 
 from __future__ import annotations
@@ -12,283 +14,356 @@ import re
 from typing import Any
 
 from . import PLAN_SCHEMA_VERSION
-from .catalog import load_catalog, resolve, verdict_rank
+from .catalog import Availability, Gateway, Scriptable, Target, lookup
 
-# Fivetran sync_mode -> Lakeflow Connect table_configuration.scd_type.
-SCD_BY_SYNC_MODE = {
-    "HISTORY": "SCD_TYPE_2",
-    "SOFT_DELETE_HISTORY": "SCD_TYPE_2",
-    "SOFT_DELETE": "SCD_TYPE_1",
-    "LIVE": "SCD_TYPE_1",
-    "LEGACY": "SCD_TYPE_1",
+# Fivetran attaches sync frequency to the connector. Databricks has no supported
+# pipeline-level schedule, so each pipeline needs a companion job. Quartz format
+# is: seconds minutes hours day-of-month month day-of-week.
+CRON_BY_MINUTES: dict[int, str] = {
+    15: "0 0/15 * * * ?",
+    30: "0 0/30 * * * ?",
+    60: "0 0 * * * ?",
+    120: "0 0 0/2 * * ?",
+    180: "0 0 0/3 * * ?",
+    360: "0 0 0/6 * * ?",
+    480: "0 0 0/8 * * ?",
+    720: "0 0 0/12 * * ?",
+    1440: "0 0 0 * * ?",
 }
 
-#: When more than this fraction of a table's columns are deselected in Fivetran,
-#: emit an allowlist (include_columns) instead of a denylist (exclude_columns).
-#: Lakeflow Connect accepts one or the other per table, never both.
-INCLUDE_LIST_THRESHOLD = 0.5
+# Below an hour a periodic trigger cannot express the cadence at all, and at
+# 1-5 minutes a cron job thrashes: every fire is a pipeline update with real
+# startup cost. A continuous job is the honest equivalent.
+CONTINUOUS_THRESHOLD_MINUTES = 5
 
-_INVALID_NAME_CHARS = re.compile(r"[^a-z0-9_]+")
+DEFAULT_SYNC_MINUTES = 360
+
+_INVALID_NAME = re.compile(r"[^a-z0-9_]+")
+
+
+def to_identifier(*parts: str) -> str:
+    """Build a Unity Catalog / pipeline-safe identifier from arbitrary text."""
+    joined = "_".join(p for p in parts if p)
+    cleaned = _INVALID_NAME.sub("_", joined.lower()).strip("_")
+    return re.sub(r"_{2,}", "_", cleaned) or "unnamed"
 
 
 def build_plan(
     inventory: dict[str, Any],
     target_catalog: str,
-    target_schema: str | None = None,
-    name_prefix: str = "lfc",
+    mar: dict[str, Any] | None = None,
     include_paused: bool = False,
-    catalog_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce a migration plan from a discovery inventory."""
-    catalog_data = catalog_data or load_catalog()
-    connections: list[dict[str, Any]] = []
+    connections = [
+        c
+        for c in inventory.get("connections", [])
+        if include_paused or not c.get("paused")
+    ]
 
-    for connection in inventory.get("connections", []):
-        if connection.get("paused") and not include_paused:
-            continue
-        connections.append(
-            _plan_connection(
-                connection,
-                target_catalog=target_catalog,
-                target_schema=target_schema,
-                name_prefix=name_prefix,
-                catalog_data=catalog_data,
-            )
-        )
-
-    connections.sort(key=lambda c: (verdict_rank(c["verdict"]), c["fivetran_service"]))
+    items = [_plan_connection(c, target_catalog, mar) for c in connections]
 
     return {
         "schema_version": PLAN_SCHEMA_VERSION,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "inventory_generated_at": inventory.get("generated_at"),
-        "catalog_last_reviewed": catalog_data.get("last_reviewed"),
-        "target": {"catalog": target_catalog, "schema": target_schema},
-        "connections": connections,
-        "summary": _summarise_plan(connections),
+        "target_catalog": target_catalog,
+        "source_account": inventory.get("account", {}),
+        "items": items,
+        "summary": summarise_plan(items),
+        "blockers": _collect(items, "blockers"),
+        "warnings": _collect(items, "warnings"),
     }
 
 
 def _plan_connection(
-    connection: dict[str, Any],
-    target_catalog: str,
-    target_schema: str | None,
-    name_prefix: str,
-    catalog_data: dict[str, Any],
+    connection: dict[str, Any], target_catalog: str, mar: dict[str, Any] | None
 ) -> dict[str, Any]:
-    service = connection.get("service") or "unknown"
-    resolution = resolve(service, catalog_data)
-    target = resolution["target"] or {}
+    service = connection.get("service") or ""
+    target = lookup(service)
+    name = to_identifier(connection.get("destination_schema") or service, connection.get("id"))
 
-    slug = sanitize_name(f"{service}_{connection.get('destination_schema') or connection['id']}")
+    objects, obj_warnings = _plan_objects(connection, target, target_catalog)
+    schedule = _plan_schedule(connection)
+    blockers, warnings = _assess(connection, target, objects, schedule)
+
+    return {
+        "fivetran": {
+            "connection_id": connection.get("id"),
+            "service": service,
+            "destination_schema": connection.get("destination_schema"),
+            "paused": connection.get("paused"),
+            "setup_state": connection.get("status", {}).get("setup_state"),
+            "sync_frequency_minutes": connection.get("sync_frequency_minutes"),
+            "networking_method": connection.get("networking_method"),
+            "monthly_mar": _mar_for(connection, mar),
+        },
+        "target": {
+            "connection_name": to_identifier(service, "conn", connection.get("id")),
+            "connection_type": target.connection_type,
+            "category": target.category.value,
+            "availability": target.availability.value,
+            "gateway": target.gateway.value,
+            "scriptable": target.scriptable.value,
+            "effort": target.effort.value,
+            "pipeline_name": name,
+            "destination_catalog": target_catalog,
+            "destination_schema": to_identifier(connection.get("destination_schema") or service),
+            "alternative": target.alternative,
+        },
+        "objects": objects,
+        "schedule": schedule,
+        "prerequisites": _prerequisites(target),
+        "blockers": blockers,
+        "warnings": warnings + obj_warnings,
+    }
+
+
+def _plan_objects(
+    connection: dict[str, Any], target: Target, target_catalog: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Translate enabled Fivetran tables into Lakeflow object specs."""
     warnings: list[str] = []
-    blockers: list[str] = []
-    manual_steps: list[str] = []
-    notes = list(resolution["notes"])
+    if not target.has_managed_connector:
+        return [], warnings
 
-    if resolution["verdict"] == "unsupported":
-        blockers.append(
-            f"Lakeflow Connect has no managed connector for Fivetran service '{service}'."
+    destination_schema = to_identifier(connection.get("destination_schema") or connection.get("service"))
+    specs: list[dict[str, Any]] = []
+
+    for table in connection.get("objects", []):
+        if not table.get("enabled"):
+            continue
+
+        config: dict[str, Any] = {}
+
+        # Fivetran HISTORY mode is SCD type 2. Anything else merges in place.
+        scd_type = "SCD_TYPE_2" if table.get("retains_history") else "SCD_TYPE_1"
+        config["scd_type"] = scd_type
+
+        if table.get("primary_keys"):
+            config["primary_keys"] = table["primary_keys"]
+        elif table.get("primary_keys_known"):
+            # Genuinely no primary key: merge semantics are not available.
+            config["scd_type"] = "APPEND_ONLY"
+            warnings.append(
+                f"{table['source_schema']}.{table['source_table']} has no primary key; "
+                "planned as APPEND_ONLY rather than a merge."
+            )
+        else:
+            warnings.append(
+                f"{table['source_schema']}.{table['source_table']} has unknown primary keys. "
+                "Re-run discovery with --columns; SCD behaviour cannot be set safely without them."
+            )
+
+        # include_columns and exclude_columns are mutually exclusive, and
+        # exclude is the faithful translation: Fivetran reports the columns
+        # somebody opted out of, leaving everything else (including future
+        # columns) syncing, which is exactly exclude_columns semantics.
+        if table.get("excluded_columns"):
+            config["exclude_columns"] = table["excluded_columns"]
+
+        if table.get("hashed_columns"):
+            warnings.append(
+                f"{table['source_schema']}.{table['source_table']} hashes "
+                f"{len(table['hashed_columns'])} column(s) in Fivetran "
+                f"({', '.join(table['hashed_columns'])}). Lakeflow Connect has no equivalent "
+                "at ingest; reproduce with a downstream masking policy or transformation."
+            )
+
+        specs.append(
+            {
+                "type": "report" if target.connection_type == "WORKDAY_RAAS" else "table",
+                "source_schema": table.get("source_schema"),
+                "source_table": table.get("source_table"),
+                "destination_catalog": target_catalog,
+                "destination_schema": destination_schema,
+                "destination_table": to_identifier(table.get("destination_table") or table.get("source_table")),
+                "table_configuration": config,
+                "primary_keys_known": table.get("primary_keys_known", False),
+            }
         )
-    elif resolution["verdict"] == "unknown":
-        blockers.append(f"Fivetran service '{service}' is not in the connector catalog.")
-    elif resolution["verdict"] == "preview":
+
+    return specs, warnings
+
+
+def _plan_schedule(connection: dict[str, Any]) -> dict[str, Any]:
+    """Map a Fivetran sync frequency onto a Lakeflow Job trigger.
+
+    There is no supported pipeline-level schedule, so every ingestion pipeline
+    needs a companion job. max_concurrent_runs is pinned to 1 because Fivetran
+    serialises syncs and an unbounded cron job would not.
+    """
+    minutes = connection.get("sync_frequency_minutes") or DEFAULT_SYNC_MINUTES
+
+    if minutes <= CONTINUOUS_THRESHOLD_MINUTES:
+        return {
+            "mode": "continuous",
+            "fivetran_minutes": minutes,
+            "max_concurrent_runs": 1,
+            "note": (
+                f"Fivetran syncs every {minutes} min. A cron job at that cadence would "
+                "thrash, since each fire is a full pipeline update. A continuous job is "
+                "the closer equivalent, but there is no documented minimum interval for "
+                "managed ingestion and source API limits may bind. Confirm before cutover."
+            ),
+        }
+
+    cron = CRON_BY_MINUTES.get(minutes)
+    if not cron:
+        nearest = min(CRON_BY_MINUTES, key=lambda m: abs(m - minutes))
+        return {
+            "mode": "cron",
+            "fivetran_minutes": minutes,
+            "quartz_cron_expression": CRON_BY_MINUTES[nearest],
+            "timezone_id": "UTC",
+            "max_concurrent_runs": 1,
+            "note": f"No exact cron for {minutes} min; using the nearest supported cadence ({nearest} min).",
+        }
+
+    return {
+        "mode": "cron",
+        "fivetran_minutes": minutes,
+        "quartz_cron_expression": cron,
+        "timezone_id": "UTC",
+        "max_concurrent_runs": 1,
+        "note": "",
+    }
+
+
+def _prerequisites(target: Target) -> dict[str, Any]:
+    steps: list[str] = []
+    if target.source_prerequisites:
+        steps.append(target.source_prerequisites)
+    if target.gateway is Gateway.REQUIRED:
+        steps.append(
+            "Create an ingestion gateway pipeline first. It runs continuously on classic "
+            "compute and is billed even while the ingestion pipeline is idle. The ingestion "
+            "pipeline references it by the gateway's pipeline_id."
+        )
+    return {
+        "steps": steps,
+        "automatable": target.prerequisites_automatable,
+        "auth_note": target.auth_note,
+    }
+
+
+def _assess(
+    connection: dict[str, Any],
+    target: Target,
+    objects: list[dict[str, Any]],
+    schedule: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Separate what stops the migration from what merely needs attention."""
+    blockers: list[str] = []
+    warnings: list[str] = []
+    service = connection.get("service")
+
+    if not target.has_managed_connector:
+        blockers.append(
+            f"No managed Lakeflow Connect connector for '{service}'. {target.alternative}"
+        )
+        return blockers, warnings
+
+    if target.scriptable is Scriptable.NO:
+        blockers.append(
+            f"'{service}' uses browser-based OAuth only, so its Unity Catalog connection "
+            "cannot be created programmatically. A human must create it once in the UI; "
+            "pipeline creation is scriptable afterwards."
+        )
+    elif target.scriptable is Scriptable.CONDITIONAL:
+        warnings.append(f"Conditionally scriptable: {target.auth_note}")
+
+    if not target.prerequisites_automatable:
         warnings.append(
-            f"The {target.get('display_name', service)} connector is "
-            f"{target.get('status')}. Confirm the customer's workspace is enrolled."
+            f"Source-side setup for '{service}' cannot be fully scripted; generate a "
+            "runbook for the source administrator."
+        )
+
+    if target.availability in (Availability.BETA, Availability.PUBLIC_PREVIEW):
+        warnings.append(
+            f"The {target.connection_type} connector is {target.availability.value.replace('_', ' ')}; "
+            "enrollment via the Databricks account team may be required."
+        )
+    elif target.availability is Availability.UNVERIFIED:
+        warnings.append(
+            f"Release state for {target.connection_type} was not verified. Confirm against "
+            "the current Lakeflow Connect connector list before committing to a date."
+        )
+
+    if not objects:
+        warnings.append(
+            "No enabled tables found. Either nothing is selected in Fivetran, or discovery "
+            "ran with --no-schemas."
+        )
+
+    unknown_keys = [o for o in objects if not o["primary_keys_known"]]
+    if unknown_keys:
+        warnings.append(
+            f"{len(unknown_keys)} of {len(objects)} tables have unknown primary keys. "
+            "Re-run discovery with --columns before generating pipelines."
+        )
+
+    if connection.get("networking_method") not in (None, "Directly"):
+        warnings.append(
+            f"Source reachable over {connection['networking_method']}. Private networking "
+            "must be designed on the Databricks side before ingestion will connect."
         )
 
     if connection.get("status", {}).get("setup_state") == "broken":
-        warnings.append(
-            "The Fivetran connection is in 'broken' setup state, so its discovered "
-            "schema may be stale. Re-verify table selection before deploying."
-        )
+        warnings.append("Connection is broken in Fivetran; its configuration may be stale.")
 
-    networking = connection.get("networking_method")
-    if networking and networking.lower() not in ("directly", "direct"):
-        manual_steps.append(
-            f"Source is reached over '{networking}' in Fivetran. Reproduce network "
-            "access from Databricks (Private Link / NCC, or place the ingestion "
-            "gateway on a network with a route to the source)."
-        )
+    if schedule.get("note"):
+        warnings.append(schedule["note"])
 
-    objects = [
-        _plan_object(obj, target_catalog, target_schema, connection)
-        for obj in connection.get("objects", [])
-        if obj.get("enabled")
-    ]
-
-    hashed = sorted({col for obj in objects for col in obj["notes_hashed_columns"]})
-    if hashed:
-        warnings.append(
-            "Fivetran hashes these columns at ingest, which Lakeflow Connect does "
-            f"not do: {', '.join(hashed)}. Either ingest them raw and hash in a "
-            "downstream table, or exclude them and re-derive."
-        )
-
-    if not objects and resolution["verdict"] not in ("unsupported", "unknown"):
-        warnings.append(
-            "No enabled tables were discovered. Either the connector does not "
-            "expose a schema config, or discovery ran with --no-schemas."
-        )
-
-    schema_handling = connection.get("schema_change_handling")
-    if schema_handling and schema_handling != "ALLOW_ALL":
-        notes.append(
-            f"Fivetran schema_change_handling is '{schema_handling}'. Lakeflow "
-            "Connect ingests new columns automatically for table-level selections; "
-            "use include_columns to pin an explicit allowlist instead."
-        )
-
-    return {
-        "fivetran_connection_id": connection.get("id"),
-        "fivetran_service": service,
-        "fivetran_group_id": connection.get("group_id"),
-        "fivetran_destination_schema": connection.get("destination_schema"),
-        "fivetran_paused": bool(connection.get("paused")),
-        "verdict": resolution["verdict"],
-        "target": {
-            "connector": resolution["target_name"],
-            "display_name": target.get("display_name"),
-            "status": target.get("status"),
-            "source_type": target.get("source_type"),
-            "connection_type": target.get("connection_type"),
-            "requires_gateway": bool(target.get("requires_gateway")),
-            "object_spec": target.get("object_spec", "table"),
-        },
-        "uc_connection_name": sanitize_name(f"{name_prefix}_{slug}"),
-        "gateway_pipeline_name": (
-            sanitize_name(f"{name_prefix}_{slug}_gateway")
-            if target.get("requires_gateway")
-            else None
-        ),
-        "pipeline_name": sanitize_name(f"{name_prefix}_{slug}_ingest"),
-        "schedule": _plan_schedule(connection, target),
-        "objects": objects,
-        "source_prerequisites": resolution["source_prerequisites"],
-        "alternatives": resolution["alternatives"],
-        "notes": notes,
-        "warnings": warnings,
-        "blockers": blockers,
-        "manual_steps": manual_steps,
-    }
+    return blockers, warnings
 
 
-def _plan_object(
-    obj: dict[str, Any],
-    target_catalog: str,
-    target_schema: str | None,
-    connection: dict[str, Any],
-) -> dict[str, Any]:
-    sync_mode = obj.get("sync_mode")
-    scd_type = SCD_BY_SYNC_MODE.get(sync_mode or "", "SCD_TYPE_1")
+def _mar_for(connection: dict[str, Any], mar: dict[str, Any] | None) -> int | None:
+    """Attach MAR to a connection.
 
-    columns = obj.get("columns") or []
-    excluded = [c for c in columns if not c["enabled"] and not c["is_primary_key"]]
-    include_columns: list[str] = []
-    exclude_columns: list[str] = []
-    if columns and excluded:
-        if len(excluded) / len(columns) > INCLUDE_LIST_THRESHOLD:
-            include_columns = [c["source_column"] for c in columns if c["enabled"]]
-        else:
-            exclude_columns = [c["source_column"] for c in excluded]
+    Fivetran's Platform Connector keys MAR by connection *name*, which is the
+    destination schema, not the connection id the REST API returns.
+    """
+    if not mar:
+        return None
+    by_connection = mar.get("by_connection") or {}
+    return by_connection.get(connection.get("destination_schema"))
 
-    notes: list[str] = []
-    primary_keys = list(obj.get("primary_keys") or [])
-    if not primary_keys:
-        notes.append(
-            "No primary key was discovered in Fivetran. Lakeflow Connect needs "
-            "primary_keys to deduplicate; set it manually or accept append-only."
-        )
-    if scd_type == "SCD_TYPE_2" and not primary_keys:
-        notes.append("SCD type 2 requires primary_keys. Fill this in before deploying.")
-    if sync_mode == "LEGACY":
-        notes.append(
-            "Fivetran sync_mode 'LEGACY' is append-only with no deletes. Mapped to "
-            "SCD type 1; confirm this matches downstream expectations."
-        )
+
+def _collect(items: list[dict[str, Any]], key: str) -> list[dict[str, str]]:
+    out = []
+    for item in items:
+        for message in item.get(key, []):
+            out.append({"connection": item["fivetran"]["connection_id"], "message": message})
+    return out
+
+
+def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
+    by_effort: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    for item in items:
+        effort = item["target"]["effort"]
+        category = item["target"]["category"]
+        by_effort[effort] = by_effort.get(effort, 0) + 1
+        by_category[category] = by_category.get(category, 0) + 1
+
+    migratable = [i for i in items if not i["blockers"]]
+    needs_gateway = [i for i in items if i["target"]["gateway"] == Gateway.REQUIRED.value]
 
     return {
-        "source_schema": obj.get("source_schema"),
-        "source_table": obj.get("source_table"),
-        "destination_catalog": target_catalog,
-        "destination_schema": target_schema
-        or obj.get("destination_schema")
-        or connection.get("destination_schema"),
-        "destination_table": obj.get("destination_table") or obj.get("source_table"),
-        "fivetran_sync_mode": sync_mode,
-        "scd_type": scd_type,
-        "primary_keys": primary_keys,
-        "include_columns": include_columns,
-        "exclude_columns": exclude_columns,
-        "notes": notes,
-        # Surfaced to the connection level, not emitted into the bundle.
-        "notes_hashed_columns": list(obj.get("hashed_columns") or []),
-    }
-
-
-def _plan_schedule(connection: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-    """Map Fivetran's sync_frequency to a Lakeflow Connect trigger."""
-    minutes = connection.get("sync_frequency_minutes")
-    if target.get("requires_gateway"):
-        # Gateway-based CDC sources stream changes; the gateway runs continuously
-        # and the ingestion pipeline applies them on a trigger.
-        return {
-            "mode": "triggered",
-            "cron": _cron_for_minutes(minutes),
-            "gateway_continuous": True,
-            "fivetran_sync_frequency_minutes": minutes,
-        }
-    if minutes and minutes <= 5:
-        return {
-            "mode": "continuous",
-            "cron": None,
-            "gateway_continuous": False,
-            "fivetran_sync_frequency_minutes": minutes,
-        }
-    return {
-        "mode": "triggered",
-        "cron": _cron_for_minutes(minutes),
-        "gateway_continuous": False,
-        "fivetran_sync_frequency_minutes": minutes,
-    }
-
-
-def _cron_for_minutes(minutes: int | None) -> str:
-    """Build a Quartz cron expression approximating a Fivetran sync frequency."""
-    if not minutes or minutes >= 1440:
-        return "0 0 2 * * ?"
-    if minutes >= 720:
-        return "0 0 2,14 * * ?"
-    if minutes >= 60:
-        hours = max(1, minutes // 60)
-        return f"0 0 0/{hours} * * ?"
-    step = max(5, minutes)
-    return f"0 0/{step} * * * ?"
-
-
-def sanitize_name(value: str) -> str:
-    """Normalise a string into a safe Databricks resource/identifier name."""
-    cleaned = _INVALID_NAME_CHARS.sub("_", (value or "").lower()).strip("_")
-    cleaned = re.sub(r"_{2,}", "_", cleaned)
-    return cleaned or "unnamed"
-
-
-def _summarise_plan(connections: list[dict[str, Any]]) -> dict[str, Any]:
-    by_verdict: dict[str, int] = {}
-    for connection in connections:
-        by_verdict[connection["verdict"]] = by_verdict.get(connection["verdict"], 0) + 1
-
-    migratable = [c for c in connections if not c["blockers"]]
-    return {
-        "connections_planned": len(connections),
+        "connections_total": len(items),
         "connections_migratable": len(migratable),
-        "connections_blocked": len(connections) - len(migratable),
-        "by_verdict": by_verdict,
-        "gateways_required": sum(1 for c in connections if c["target"]["requires_gateway"]),
-        "tables_planned": sum(len(c["objects"]) for c in connections),
-        "tables_scd_type_2": sum(
-            1 for c in connections for o in c["objects"] if o["scd_type"] == "SCD_TYPE_2"
+        "connections_blocked": len(items) - len(migratable),
+        "tables_total": sum(len(i["objects"]) for i in items),
+        "tables_scd2": sum(
+            1
+            for i in items
+            for o in i["objects"]
+            if o["table_configuration"].get("scd_type") == "SCD_TYPE_2"
         ),
-        "manual_step_count": sum(len(c["manual_steps"]) for c in connections),
+        "gateways_required": len(needs_gateway),
+        # Every pipeline needs a companion job, since Databricks has no
+        # supported pipeline-level schedule.
+        "jobs_required": len(migratable),
+        "by_effort": by_effort,
+        "by_category": by_category,
     }
