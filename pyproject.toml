@@ -1,0 +1,37 @@
+[project]
+name = "fivetran-lfc-migration-skill"
+version = "0.1.0"
+description = "Agent skill for migrating Fivetran ingestion to Databricks Lakeflow Connect"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "F",    # pyflakes
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "ISC",  # implicit string concat
+    "RUF",  # ruff-specific
+]
+
+# The entrypoint scripts insert their own directory on sys.path before importing
+# the ftlfc package, so that they run without installation. That requires
+# imports after code, which E402 would otherwise flag on every one of them.
+[tool.ruff.lint.per-file-ignores]
+"skills/fivetran-to-lakeflow-migration/scripts/*.py" = ["E402"]
+"tests/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

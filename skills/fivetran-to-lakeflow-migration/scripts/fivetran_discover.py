@@ -19,8 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.fivetran import FivetranClient, FivetranError  # noqa: E402
-from ftlfc.inventory import build_inventory  # noqa: E402
+from ftlfc.fivetran import FivetranClient, FivetranError
+from ftlfc.inventory import build_inventory
 
 
 def main(argv: list[str] | None = None) -> int:

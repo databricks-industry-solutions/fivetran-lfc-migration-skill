@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.bundle import build_bundle  # noqa: E402
+from ftlfc.bundle import build_bundle
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,9 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    files = build_bundle(
-        plan, bundle_name=args.name, host=args.host, notification_email=args.email
-    )
+    files = build_bundle(plan, bundle_name=args.name, host=args.host, notification_email=args.email)
 
     for relative, contents in sorted(files.items()):
         path = args.output / relative
@@ -69,17 +67,18 @@ def main(argv: list[str] | None = None) -> int:
 
 def _report(plan: dict, output: Path, files: dict) -> None:
     summary = plan["summary"]
-    pipelines = sum(1 for f in files if f.endswith(".pipeline.yml"))
+    gateways = sum(1 for f in files if f.endswith("_gateway.pipeline.yml"))
+    pipelines = sum(1 for f in files if f.endswith(".pipeline.yml")) - gateways
 
     print(f"Wrote {len(files)} files to {output}")
-    print(f"  {pipelines} pipeline definition(s), {summary['gateways_required']} with a gateway")
+    print(f"  {pipelines} ingestion pipeline(s) covering {summary['tables_total']} table(s)")
+    print(f"  {gateways} ingestion gateway(s)")
     print(f"  {sum(1 for f in files if f.endswith('.job.yml'))} companion job(s)")
-    print(f"  {summary['tables_total']} table(s)")
     print()
     print("  Next:")
-    print(f"    1. Fill in the REPLACE_ME values in {output}/scripts/create_connections.sh")
-    print(f"    2. ./{output}/scripts/create_connections.sh <profile>")
-    print(f"    3. databricks bundle validate --strict -t dev  (from {output})")
+    print("    1. Fill in the REPLACE_ME values in scripts/create_connections.sh")
+    print(f"    2. cd {output} && ./scripts/create_connections.sh <profile>")
+    print("    3. databricks bundle validate --strict -t dev")
     print("    4. databricks bundle deploy -t dev")
 
     blocked = summary["connections_blocked"]

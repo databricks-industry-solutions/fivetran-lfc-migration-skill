@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.costs import compare, rate_card_from_overrides  # noqa: E402
+from ftlfc.costs import compare, rate_card_from_overrides
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON array of system.billing.usage rows from a pilot, which replaces the model",
     )
     parser.add_argument(
-        "--rates", help='JSON object overriding rate card fields, e.g. \'{"minutes_per_run": 12}\''
+        "--rates", help="JSON object overriding rate card fields, e.g. '{\"minutes_per_run\": 12}'"
     )
     parser.add_argument("-o", "--output", default="out/cost.json")
     parser.add_argument("-v", "--verbose", action="store_true")

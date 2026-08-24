@@ -10,8 +10,8 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.catalog import Category, Effort, Gateway, Scriptable, lookup  # noqa: E402
-from ftlfc.mapping import CRON_BY_MINUTES, build_plan, to_identifier  # noqa: E402
+from ftlfc.catalog import Category, Effort, Gateway, Scriptable, lookup
+from ftlfc.mapping import CRON_BY_MINUTES, build_plan, to_identifier
 
 
 class TestCatalog:
@@ -128,6 +128,32 @@ class TestBuildPlan:
         assert item["blockers"] == []
         assert len(item["objects"]) == 1
 
+    def test_salesforce_source_schema_is_rewritten_to_objects(self) -> None:
+        # Fivetran writes Salesforce objects under a schema named after the
+        # connector, but the connector only resolves them under "objects".
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="salesforce",
+                    destination_schema="salesforce",
+                    objects=[_table(source_schema="salesforce", source_table="Account")],
+                )
+            ),
+            "main_prod",
+        )
+        obj = plan["items"][0]["objects"][0]
+        assert obj["source_schema"] == "objects"
+        assert obj["fivetran_source_schema"] == "salesforce"
+        assert any("rewritten" in w for w in plan["items"][0]["warnings"])
+
+    def test_database_source_schema_is_preserved(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(objects=[_table(source_schema="dbo")])), "main_prod"
+        )
+        obj = plan["items"][0]["objects"][0]
+        assert obj["source_schema"] == "dbo"
+        assert not any("rewritten" in w for w in plan["items"][0]["warnings"])
+
     def test_history_mode_becomes_scd_type_2(self) -> None:
         plan = build_plan(
             _inventory(_connection(objects=[_table(retains_history=True)])), "main_prod"
@@ -156,9 +182,7 @@ class TestBuildPlan:
 
     def test_unknown_primary_keys_warn_and_do_not_force_append_only(self) -> None:
         plan = build_plan(
-            _inventory(
-                _connection(objects=[_table(primary_keys=[], primary_keys_known=False)])
-            ),
+            _inventory(_connection(objects=[_table(primary_keys=[], primary_keys_known=False)])),
             "main_prod",
         )
         item = plan["items"][0]
@@ -175,7 +199,9 @@ class TestBuildPlan:
 
     def test_disabled_tables_are_skipped(self) -> None:
         plan = build_plan(
-            _inventory(_connection(objects=[_table(), _table(source_table="Audit", enabled=False)])),
+            _inventory(
+                _connection(objects=[_table(), _table(source_table="Audit", enabled=False)])
+            ),
             "main_prod",
         )
         assert len(plan["items"][0]["objects"]) == 1
@@ -199,7 +225,8 @@ class TestBuildPlan:
 
     def test_private_networking_is_flagged(self) -> None:
         plan = build_plan(
-            _inventory(_connection(networking_method="PrivateLink", objects=[_table()])), "main_prod"
+            _inventory(_connection(networking_method="PrivateLink", objects=[_table()])),
+            "main_prod",
         )
         assert any("PrivateLink" in w for w in plan["items"][0]["warnings"])
 

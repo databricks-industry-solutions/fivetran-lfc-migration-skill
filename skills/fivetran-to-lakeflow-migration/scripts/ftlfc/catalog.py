@@ -19,21 +19,21 @@ https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
 class Category(str, Enum):
     """How Databricks ingests this source, which determines the architecture."""
 
-    SAAS = "saas_managed"          # connection + serverless pipeline, no gateway
+    SAAS = "saas_managed"  # connection + serverless pipeline, no gateway
     DATABASE_CDC = "database_cdc"  # log-based CDC, usually gateway + pipeline
-    QUERY_BASED = "query_based"    # scheduled cursor-column query, serverless
-    FILE = "file_managed"          # managed file-source connector
-    STREAMING = "streaming"        # managed streaming connector
-    STANDARD = "standard"          # not managed: Auto Loader, Kafka, SFTP
-    FEDERATION = "federation"      # Lakehouse Federation foreign catalog
-    NONE = "none"                  # no Databricks-native path
+    QUERY_BASED = "query_based"  # scheduled cursor-column query, serverless
+    FILE = "file_managed"  # managed file-source connector
+    STREAMING = "streaming"  # managed streaming connector
+    STANDARD = "standard"  # not managed: Auto Loader, Kafka, SFTP
+    FEDERATION = "federation"  # Lakehouse Federation foreign catalog
+    NONE = "none"  # no Databricks-native path
 
 
 class Gateway(str, Enum):
@@ -48,9 +48,9 @@ class Scriptable(str, Enum):
     """Whether the UC connection can be created with no human browser step."""
 
     YES = "yes"
-    NO = "no"                # OAuth U2M only; a human must click consent
+    NO = "no"  # OAuth U2M only; a human must click consent
     CONDITIONAL = "conditional"  # scriptable only on a specific auth path
-    NA = "not_applicable"    # no UC connection involved
+    NA = "not_applicable"  # no UC connection involved
 
 
 class Availability(str, Enum):
@@ -64,9 +64,9 @@ class Availability(str, Enum):
 class Effort(str, Enum):
     """Overall migration difficulty, derived rather than hand-assigned."""
 
-    LOW = "low"        # fully automatable end to end
+    LOW = "low"  # fully automatable end to end
     MEDIUM = "medium"  # automatable, but source-side admin work first
-    HIGH = "high"      # a human must complete a browser or vendor-UI step
+    HIGH = "high"  # a human must complete a browser or vendor-UI step
     BLOCKED = "blocked"  # no managed path; needs a different architecture
 
 
@@ -87,6 +87,11 @@ class Target:
     prerequisites_automatable: bool = True
     #: What to do instead when there is no managed connector.
     alternative: str = ""
+    #: Source schema the connector addresses objects under, when it is fixed by
+    #: the connector rather than taken from the source. Salesforce, for example,
+    #: exposes every SObject under a schema literally named "objects", so
+    #: Fivetran's schema name cannot be carried over.
+    fixed_source_schema: str | None = None
     notes: str = ""
 
     @property
@@ -171,6 +176,7 @@ def _saas(
     auth_note: str = "",
     prereq: str = "",
     prereq_auto: bool = True,
+    fixed_source_schema: str | None = None,
     notes: str = "",
 ) -> Target:
     return Target(
@@ -182,6 +188,7 @@ def _saas(
         auth_note=auth_note,
         source_prerequisites=prereq,
         prerequisites_automatable=prereq_auto,
+        fixed_source_schema=fixed_source_schema,
         notes=notes,
     )
 
@@ -244,7 +251,13 @@ CATALOG: dict[str, Target] = {
                 "must be dropped manually when the pipeline is deleted."
             ),
         )
-        for service in ("postgres", "postgres_rds", "aurora_postgres", "azure_postgres", "heroku_postgres")
+        for service in (
+            "postgres",
+            "postgres_rds",
+            "aurora_postgres",
+            "azure_postgres",
+            "heroku_postgres",
+        )
     },
     **{
         service: Target(
@@ -280,7 +293,6 @@ CATALOG: dict[str, Target] = {
         ),
         notes="Query-based only; there is no Teradata CDC connector.",
     ),
-
     # -- SaaS: scriptable with static credentials ---------------------------
     "salesforce": _saas(
         "SALESFORCE",
@@ -294,6 +306,7 @@ CATALOG: dict[str, Target] = {
         ),
         prereq=_SALESFORCE_PREREQ,
         prereq_auto=False,
+        fixed_source_schema="objects",
         notes=(
             "For formula fields set the top-level pipeline configuration flag "
             "pipelines.enableSalesforceFormulaFieldsMVComputation, not the private "
@@ -307,6 +320,7 @@ CATALOG: dict[str, Target] = {
         auth_note="Same as Salesforce. Set the is_sandbox option.",
         prereq=_SALESFORCE_PREREQ,
         prereq_auto=False,
+        fixed_source_schema="objects",
     ),
     "workday": _saas(
         "WORKDAY_RAAS",
@@ -374,7 +388,9 @@ CATALOG: dict[str, Target] = {
             "connector reads through Synapse Link, not the D365 API directly."
         ),
         prereq_auto=False,
-        notes="Meaningful architectural dependency if the customer does not already run Synapse Link.",
+        notes=(
+            "Meaningful architectural dependency if the customer does not already run Synapse Link."
+        ),
     ),
     "sharepoint": Target(
         connection_type="SHAREPOINT",
@@ -392,7 +408,6 @@ CATALOG: dict[str, Target] = {
         source_prerequisites="Google OAuth client plus Drive folder permissions.",
         prerequisites_automatable=False,
     ),
-
     # -- SaaS: browser consent required, connection cannot be scripted ------
     "hubspot": _u2m("HUBSPOT"),
     "zendesk": _u2m("ZENDESK"),
@@ -406,33 +421,55 @@ CATALOG: dict[str, Target] = {
         "META_MARKETING", notes="Named Meta Ads in Databricks; covers Facebook and Instagram Ads."
     ),
     "instagram_business": _u2m("META_MARKETING"),
-    "salesforce_marketing_cloud": _saas("SALESFORCE", notes="Distinct managed connector; auth mode unverified."),
-
+    "salesforce_marketing_cloud": _saas(
+        "SALESFORCE", notes="Distinct managed connector; auth mode unverified."
+    ),
     # -- No managed connector: a different architecture is the answer -------
     **{
         service: _none(
             "Auto Loader (cloudFiles) via a Lakeflow pipeline or streaming table, or "
             "COPY INTO for small scheduled loads.",
-            notes="Object storage is not a Lakeflow Connect managed connector, but it is a well-trodden path.",
+            notes=(
+                "Object storage is not a Lakeflow Connect managed connector, but it is a "
+                "well-trodden path."
+            ),
         )
         for service in ("s3", "gcs", "azure_blob_storage", "azure_data_lake_storage")
     },
     **{
-        service: _none("Standard streaming connector via Structured Streaming or a Lakeflow pipeline.")
+        service: _none(
+            "Standard streaming connector via Structured Streaming or a Lakeflow pipeline."
+        )
         for service in ("kafka", "confluent_cloud", "aws_msk", "kinesis", "google_pub_sub")
     },
-    **{service: _none("Standard SFTP/FTP connector authored as a Lakeflow pipeline.") for service in ("sftp", "ftp")},
-    **{service: _federated() for service in ("snowflake_db", "redshift_db", "big_query", "azure_synapse")},
+    **{
+        service: _none("Standard SFTP/FTP connector authored as a Lakeflow pipeline.")
+        for service in ("sftp", "ftp")
+    },
+    **{
+        service: _federated()
+        for service in ("snowflake_db", "redshift_db", "big_query", "azure_synapse")
+    },
     **{
         service: _none(
             "No managed connector and no federation path. Keep on Fivetran, use a partner "
             "tool, or build a custom connector."
         )
-        for service in ("mongo", "mongo_sharded", "dynamodb", "cosmos", "google_sheets", "oracle_fusion")
+        for service in (
+            "mongo",
+            "mongo_sharded",
+            "dynamodb",
+            "cosmos",
+            "google_sheets",
+            "oracle_fusion",
+        )
     },
     "salesforce_data_cloud": _none(
         "Salesforce Data Cloud zero-copy sharing or Delta Sharing, outside Lakeflow Connect.",
-        notes="A SALESFORCE_DATA_CLOUD connection type exists but is U2M-only and not a managed ingestion connector.",
+        notes=(
+            "A SALESFORCE_DATA_CLOUD connection type exists but is U2M-only and not a "
+            "managed ingestion connector."
+        ),
     ),
 }
 

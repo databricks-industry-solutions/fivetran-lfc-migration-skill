@@ -21,8 +21,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -184,9 +185,7 @@ class FivetranClient:
                     last_error = exc
                     continue
                 if exc.code not in RETRY_STATUS or attempt == self.max_attempts:
-                    raise FivetranError(
-                        f"GET {url} failed with HTTP {exc.code}: {detail}"
-                    ) from exc
+                    raise FivetranError(f"GET {url} failed with HTTP {exc.code}: {detail}") from exc
                 last_error = exc
             except urllib.error.URLError as exc:
                 if attempt == self.max_attempts:
@@ -243,8 +242,7 @@ class FivetranClient:
             if cursor:
                 page_params["cursor"] = cursor
             data = self.get(path, page_params)
-            for item in data.get("items", []) or []:
-                yield item
+            yield from data.get("items", []) or []
             cursor = data.get("next_cursor")
             if not cursor or cursor in seen_cursors:
                 return
@@ -313,9 +311,7 @@ class FivetranClient:
         self.warnings.append(f"schemas for {connection_id} unavailable: {last}")
         return {}
 
-    def get_table_columns(
-        self, connection_id: str, schema: str, table: str
-    ) -> dict[str, Any]:
+    def get_table_columns(self, connection_id: str, schema: str, table: str) -> dict[str, Any]:
         """Fetch the exhaustive column list for one table.
 
         The schemas endpoint returns only columns that were explicitly
@@ -327,8 +323,7 @@ class FivetranClient:
         quoted_schema = urllib.parse.quote(schema, safe="")
         quoted_table = urllib.parse.quote(table, safe="")
         path = (
-            f"/v1/connections/{connection_id}/schemas/{quoted_schema}"
-            f"/tables/{quoted_table}/columns"
+            f"/v1/connections/{connection_id}/schemas/{quoted_schema}/tables/{quoted_table}/columns"
         )
         try:
             return self.get(path)
@@ -368,7 +363,7 @@ class FivetranClient:
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
     try:
         payload = exc.read().decode("utf-8")
-    except Exception:  # noqa: BLE001 - error reporting must never mask the HTTPError
+    except Exception:
         return exc.reason or ""
     try:
         parsed = json.loads(payload)
@@ -385,7 +380,9 @@ def redact(value: Any, _key: str = "") -> Any:
         return [redact(v, _key) for v in value]
 
     key = _key.lower()
-    if key and key not in SECRET_KEY_ALLOWLIST:
-        if any(hint in key for hint in SECRET_KEY_HINTS):
-            return None if value is None else "***REDACTED***"
+    is_secret = (
+        key and key not in SECRET_KEY_ALLOWLIST and any(hint in key for hint in SECRET_KEY_HINTS)
+    )
+    if is_secret:
+        return None if value is None else "***REDACTED***"
     return value

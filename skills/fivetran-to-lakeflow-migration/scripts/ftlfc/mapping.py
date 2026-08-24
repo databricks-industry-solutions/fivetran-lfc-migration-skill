@@ -56,9 +56,7 @@ def build_plan(
 ) -> dict[str, Any]:
     """Produce a migration plan from a discovery inventory."""
     connections = [
-        c
-        for c in inventory.get("connections", [])
-        if include_paused or not c.get("paused")
+        c for c in inventory.get("connections", []) if include_paused or not c.get("paused")
     ]
 
     items = [_plan_connection(c, target_catalog, mar) for c in connections]
@@ -126,7 +124,9 @@ def _plan_objects(
     if not target.has_managed_connector:
         return [], warnings
 
-    destination_schema = to_identifier(connection.get("destination_schema") or connection.get("service"))
+    destination_schema = to_identifier(
+        connection.get("destination_schema") or connection.get("service")
+    )
     specs: list[dict[str, Any]] = []
 
     for table in connection.get("objects", []):
@@ -172,14 +172,31 @@ def _plan_objects(
         specs.append(
             {
                 "type": "report" if target.connection_type == "WORKDAY_RAAS" else "table",
-                "source_schema": table.get("source_schema"),
+                # Some connectors address objects under a schema they define
+                # themselves, so Fivetran's schema name must not be carried over.
+                "source_schema": target.fixed_source_schema or table.get("source_schema"),
+                "fivetran_source_schema": table.get("source_schema"),
                 "source_table": table.get("source_table"),
                 "destination_catalog": target_catalog,
                 "destination_schema": destination_schema,
-                "destination_table": to_identifier(table.get("destination_table") or table.get("source_table")),
+                "destination_table": to_identifier(
+                    table.get("destination_table") or table.get("source_table")
+                ),
                 "table_configuration": config,
                 "primary_keys_known": table.get("primary_keys_known", False),
             }
+        )
+
+    rewritten = {
+        s["fivetran_source_schema"]
+        for s in specs
+        if s["fivetran_source_schema"] != s["source_schema"]
+    }
+    if rewritten:
+        warnings.append(
+            f"Source schema rewritten from {', '.join(sorted(rewritten))} to "
+            f"'{target.fixed_source_schema}': the {target.connection_type} connector "
+            "addresses objects under a schema it defines, not the one Fivetran used."
         )
 
     return specs, warnings
@@ -216,7 +233,10 @@ def _plan_schedule(connection: dict[str, Any]) -> dict[str, Any]:
             "quartz_cron_expression": CRON_BY_MINUTES[nearest],
             "timezone_id": "UTC",
             "max_concurrent_runs": 1,
-            "note": f"No exact cron for {minutes} min; using the nearest supported cadence ({nearest} min).",
+            "note": (
+                f"No exact cron for {minutes} min; using the nearest supported "
+                f"cadence ({nearest} min)."
+            ),
         }
 
     return {
@@ -279,9 +299,10 @@ def _assess(
         )
 
     if target.availability in (Availability.BETA, Availability.PUBLIC_PREVIEW):
+        state = target.availability.value.replace("_", " ")
         warnings.append(
-            f"The {target.connection_type} connector is {target.availability.value.replace('_', ' ')}; "
-            "enrollment via the Databricks account team may be required."
+            f"The {target.connection_type} connector is {state}; enrollment via the "
+            "Databricks account team may be required."
         )
     elif target.availability is Availability.UNVERIFIED:
         warnings.append(

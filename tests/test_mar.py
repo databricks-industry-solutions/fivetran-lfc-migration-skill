@@ -12,7 +12,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.mar import (  # noqa: E402
+from ftlfc.mar import (
     MarError,
     MarRecord,
     _normalise_month,

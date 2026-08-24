@@ -39,7 +39,7 @@ _MANUAL_CONNECTION_NOTE = (
 class _Dumper(yaml.SafeDumper):
     """Keeps nested bundle YAML readable by indenting sequences under their key."""
 
-    def increase_indent(self, flow: bool = False, indentless: bool = False):  # noqa: ANN201
+    def increase_indent(self, flow: bool = False, indentless: bool = False):
         return super().increase_indent(flow, False)
 
 
@@ -173,9 +173,7 @@ def _gateway_pipeline(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ingestion_definition(
-    item: dict[str, Any], needs_gateway: bool, key: str
-) -> dict[str, Any]:
+def _ingestion_definition(item: dict[str, Any], needs_gateway: bool, key: str) -> dict[str, Any]:
     target = item["target"]
     definition: dict[str, Any] = {}
 
@@ -198,7 +196,8 @@ def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
 
     if kind == "report":
         spec = {
-            "source_url": obj.get("source_url") or f"REPLACE_WITH_RAAS_URL_FOR_{obj['source_table']}",
+            "source_url": obj.get("source_url")
+            or f"REPLACE_WITH_RAAS_URL_FOR_{obj['source_table']}",
             "destination_catalog": "${var.dest_catalog}",
             "destination_schema": obj["destination_schema"],
             "destination_table": obj["destination_table"],
@@ -286,7 +285,9 @@ def _connection_script(plan: dict[str, Any]) -> str:
             continue
         seen.add(name)
 
-        lines.append(f"# -- {item['fivetran']['service']} -> {target['connection_type']} " + "-" * 20)
+        lines.append(
+            f"# -- {item['fivetran']['service']} -> {target['connection_type']} " + "-" * 20
+        )
 
         if item["blockers"]:
             lines.append(f"# SKIPPED. {_MANUAL_CONNECTION_NOTE}")
@@ -306,7 +307,7 @@ def _connection_script(plan: dict[str, Any]) -> str:
         }
         body = json.dumps(payload, indent=2)
         lines.append(f"echo 'Creating connection {name}...'")
-        lines.append(f'databricks connections create --profile "$PROFILE" --json \'{body}\'')
+        lines.append(f"databricks connections create --profile \"$PROFILE\" --json '{body}'")
         lines.append("")
 
     return "\n".join(lines) + "\n"
@@ -316,8 +317,18 @@ def _connection_script(plan: dict[str, Any]) -> str:
 # are redacted by the API and could not be observed, so they are marked for the
 # operator to supply rather than guessed at.
 _OPTION_HINTS: dict[str, dict[str, str]] = {
-    "SQLSERVER": {"host": "REPLACE_ME", "port": "1433", "user": "REPLACE_ME", "password": "REPLACE_ME"},
-    "POSTGRESQL": {"host": "REPLACE_ME", "port": "5432", "user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "SQLSERVER": {
+        "host": "REPLACE_ME",
+        "port": "1433",
+        "user": "REPLACE_ME",
+        "password": "REPLACE_ME",
+    },
+    "POSTGRESQL": {
+        "host": "REPLACE_ME",
+        "port": "5432",
+        "user": "REPLACE_ME",
+        "password": "REPLACE_ME",
+    },
     "MYSQL": {"host": "REPLACE_ME", "port": "3306", "user": "REPLACE_ME", "password": "REPLACE_ME"},
     "ORACLE": {
         "host": "REPLACE_ME",
@@ -326,7 +337,12 @@ _OPTION_HINTS: dict[str, dict[str, str]] = {
         "user": "REPLACE_ME",
         "password": "REPLACE_ME",
     },
-    "TERADATA": {"host": "REPLACE_ME", "port": "1025", "user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "TERADATA": {
+        "host": "REPLACE_ME",
+        "port": "1025",
+        "user": "REPLACE_ME",
+        "password": "REPLACE_ME",
+    },
     "SALESFORCE": {
         "instance_url": "REPLACE_ME",
         "is_sandbox": "false",
@@ -359,7 +375,9 @@ _OPTION_HINTS: dict[str, dict[str, str]] = {
 
 
 def _connection_options(connection_type: str) -> dict[str, str]:
-    return _OPTION_HINTS.get(connection_type, {"REPLACE_ME": "see references/lakeflow-connect-api.md"})
+    return _OPTION_HINTS.get(
+        connection_type, {"REPLACE_ME": "see references/lakeflow-connect-api.md"}
+    )
 
 
 def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
@@ -399,10 +417,14 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         "## Before you deploy",
         "",
         "- Fill in every `REPLACE_ME` in `scripts/create_connections.sh`.",
-        "- Gateways run continuously on classic compute and are billed even when the "
-        "ingestion pipeline is idle.",
-        "- A pipeline fails if a destination table already exists, so deploy into a clean "
-        "schema or set `destination_table` explicitly.",
+        (
+            "- Gateways run continuously on classic compute and are billed even when the "
+            "ingestion pipeline is idle."
+        ),
+        (
+            "- A pipeline fails if a destination table already exists, so deploy into a clean "
+            "schema or set `destination_table` explicitly."
+        ),
     ]
 
     if blocked:
@@ -415,6 +437,8 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         ]
         for item in blocked:
             service = item["fivetran"]["service"]
-            lines.append(f"- **{service}** (`{item['fivetran']['connection_id']}`): {item['blockers'][0]}")
+            lines.append(
+                f"- **{service}** (`{item['fivetran']['connection_id']}`): {item['blockers'][0]}"
+            )
 
     return "\n".join(lines) + "\n"

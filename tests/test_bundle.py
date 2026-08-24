@@ -11,7 +11,7 @@ import yaml
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.bundle import build_bundle  # noqa: E402
+from ftlfc.bundle import build_bundle
 
 
 def _item(
@@ -77,9 +77,7 @@ def _plan(*items, catalog: str = "main_prod") -> dict:
             "connections_total": len(item_list),
             "connections_blocked": len(item_list) - len(migratable),
             "tables_total": sum(len(i["objects"]) for i in migratable),
-            "gateways_required": sum(
-                1 for i in migratable if i["target"]["gateway"] == "required"
-            ),
+            "gateways_required": sum(1 for i in migratable if i["target"]["gateway"] == "required"),
         },
     }
 
@@ -127,7 +125,9 @@ class TestSaasPipeline:
     @pytest.fixture
     def pipeline(self) -> dict:
         files = build_bundle(_plan(_item()), "acme")
-        return _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"]["sales_abc"]
+        return _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
+            "sales_abc"
+        ]
 
     def test_runs_serverless(self, pipeline: dict) -> None:
         assert pipeline["serverless"] is True
@@ -169,16 +169,16 @@ class TestGatewayPipeline:
         assert list(ingestion["resources"]["pipelines"]) == ["sales_abc"]
 
     def test_gateway_runs_continuously_on_classic_compute(self, files: dict[str, str]) -> None:
-        gateway = _load(files, "resources/sales_abc_gateway.pipeline.yml")["resources"]["pipelines"][
-            "sales_abc_gateway"
-        ]
+        gateway = _load(files, "resources/sales_abc_gateway.pipeline.yml")["resources"][
+            "pipelines"
+        ]["sales_abc_gateway"]
         assert gateway["continuous"] is True
         assert gateway["serverless"] is False
 
     def test_gateway_declares_its_staging_storage(self, files: dict[str, str]) -> None:
-        gateway = _load(files, "resources/sales_abc_gateway.pipeline.yml")["resources"]["pipelines"][
-            "sales_abc_gateway"
-        ]
+        gateway = _load(files, "resources/sales_abc_gateway.pipeline.yml")["resources"][
+            "pipelines"
+        ]["sales_abc_gateway"]
         definition = gateway["gateway_definition"]
         assert definition["connection_name"] == "conn_sales_abc"
         assert definition["gateway_storage_catalog"] == "${var.staging_catalog}"

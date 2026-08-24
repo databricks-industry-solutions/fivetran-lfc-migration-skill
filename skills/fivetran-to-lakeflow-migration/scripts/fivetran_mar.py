@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.mar import (  # noqa: E402
+from ftlfc.mar import (
     PLATFORM_SCHEMAS,
     MarError,
     aggregate,

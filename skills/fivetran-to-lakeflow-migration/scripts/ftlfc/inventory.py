@@ -269,9 +269,7 @@ def flatten_schemas(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return tables
 
 
-def _apply_columns(
-    table: dict[str, Any], columns: list[dict[str, Any]], complete: bool
-) -> None:
+def _apply_columns(table: dict[str, Any], columns: list[dict[str, Any]], complete: bool) -> None:
     """Attach column state to a table record.
 
     ``complete`` distinguishes the exhaustive list from the columns endpoint

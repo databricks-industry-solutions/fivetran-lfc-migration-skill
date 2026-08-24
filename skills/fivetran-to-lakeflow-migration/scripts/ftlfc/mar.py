@@ -22,8 +22,9 @@ import io
 import json
 import logging
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -176,7 +177,14 @@ def run_databricks_query(
         "disposition": "INLINE",
         "wait_timeout": "50s",
     }
-    command = ["databricks", "api", "post", "/api/2.0/sql/statements/", "--json", json.dumps(payload)]
+    command = [
+        "databricks",
+        "api",
+        "post",
+        "/api/2.0/sql/statements/",
+        "--json",
+        json.dumps(payload),
+    ]
     if profile:
         command += ["--profile", profile]
 
@@ -193,7 +201,9 @@ def run_databricks_query(
         raise MarError(f"Databricks query timed out after {timeout}s") from exc
 
     if completed.returncode != 0:
-        raise MarError(f"databricks CLI failed: {completed.stderr.strip() or completed.stdout.strip()}")
+        raise MarError(
+            f"databricks CLI failed: {completed.stderr.strip() or completed.stdout.strip()}"
+        )
 
     try:
         response = json.loads(completed.stdout or "{}")
@@ -220,7 +230,7 @@ def _rows_from_statement(response: dict[str, Any]) -> list[dict[str, Any]]:
             "Databricks truncated the result set. Narrow the query window with --months "
             "or export via --print-sql instead."
         )
-    return [dict(zip(columns, row)) for row in data]
+    return [dict(zip(columns, row, strict=False)) for row in data]
 
 
 def detect_platform_schema(

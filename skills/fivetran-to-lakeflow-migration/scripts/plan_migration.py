@@ -19,16 +19,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.mapping import build_plan  # noqa: E402
+from ftlfc.mapping import build_plan
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-i", "--inventory", type=Path, default=Path("out/inventory.json"))
     parser.add_argument("--mar", type=Path, help="MAR JSON from fivetran_mar.py")
-    parser.add_argument(
-        "-c", "--catalog", required=True, help="destination Unity Catalog catalog"
-    )
+    parser.add_argument("-c", "--catalog", required=True, help="destination Unity Catalog catalog")
     parser.add_argument(
         "--include-paused",
         action="store_true",
@@ -45,7 +43,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if not args.inventory.exists():
-        print(f"error: {args.inventory} not found. Run fivetran_discover.py first.", file=sys.stderr)
+        print(
+            f"error: {args.inventory} not found. Run fivetran_discover.py first.", file=sys.stderr
+        )
         return 1
 
     inventory = json.loads(args.inventory.read_text())
@@ -86,10 +86,7 @@ def _report(plan: dict, destination: Path) -> None:
         f"  {summary['connections_migratable']} of {summary['connections_total']} connections "
         "can be migrated without manual intervention"
     )
-    print(
-        f"  {summary['tables_total']} tables "
-        f"({summary['tables_scd2']} needing SCD type 2)"
-    )
+    print(f"  {summary['tables_total']} tables ({summary['tables_scd2']} needing SCD type 2)")
     print(
         f"  {summary['jobs_required']} jobs and {summary['gateways_required']} gateways to create "
         "alongside the pipelines"

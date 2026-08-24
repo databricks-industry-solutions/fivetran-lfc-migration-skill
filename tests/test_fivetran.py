@@ -10,8 +10,8 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.fivetran import ACCEPT_V1, ACCEPT_V2, _accept_for, redact  # noqa: E402
-from ftlfc.inventory import count_objects, flatten_schemas, summarise  # noqa: E402
+from ftlfc.fivetran import ACCEPT_V1, ACCEPT_V2, _accept_for, redact
+from ftlfc.inventory import count_objects, flatten_schemas, summarise
 
 
 class TestAcceptHeader:

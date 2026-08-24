@@ -37,8 +37,8 @@ HOURS_PER_MONTH = 730.0
 # Observed live in system.billing.list_prices (AWS, USD, currently effective).
 # Managed ingestion resolves to the serverless *jobs* SKU, not a DLT SKU, and
 # there is no dedicated Lakeflow Connect SKU at all.
-DEFAULT_SERVERLESS_DBU_USD = 0.45      # ENTERPRISE_JOBS_SERVERLESS_COMPUTE_<REGION>
-DEFAULT_GATEWAY_DBU_USD = 0.36         # ENTERPRISE_DLT_ADVANCED_COMPUTE
+DEFAULT_SERVERLESS_DBU_USD = 0.45  # ENTERPRISE_JOBS_SERVERLESS_COMPUTE_<REGION>
+DEFAULT_GATEWAY_DBU_USD = 0.36  # ENTERPRISE_DLT_ADVANCED_COMPUTE
 
 # Derived from Fivetran's own pricing-page examples, which land consistently on
 # ~$500 per million MAR below 1M. Fivetran publishes no rate card.
@@ -75,21 +75,33 @@ class RateCard:
     def describe_assumptions(self) -> list[str]:
         """The caveats that must travel with any number this module produces."""
         return [
-            f"Serverless ingestion priced at ${self.serverless_dbu_usd:.2f}/DBU and gateway "
-            f"compute at ${self.gateway_dbu_usd:.2f}/DBU. These are AWS list prices; they vary "
-            "by region and tier, and list price is not invoiced price.",
-            f"Each ingestion run is assumed to consume {self.minutes_per_run:g} minutes of "
-            "serverless compute. Databricks publishes no DBU-per-row or DBU-per-GB "
-            "coefficient, so this is the model's largest source of error.",
-            f"A continuously-running gateway is assumed to draw {self.gateway_dbu_per_hour:g} "
-            "DBU/hour. This depends entirely on node sizing and is unverified.",
-            f"Classic-compute cloud infrastructure is added at {self.infra_uplift:.0%} on top of "
-            "gateway DBU cost. It never appears in system.billing.usage.",
-            f"Fivetran cost is modelled at ${self.fivetran_usd_per_million_mar:,.0f} per million "
-            "MAR. Fivetran publishes no rate card; this is derived from their pricing examples "
-            "and is wrong for Enterprise, Business Critical, and any ELA.",
-            "Excluded from both sides: storage, egress, private networking, and downstream "
-            "transformation compute.",
+            (
+                f"Serverless ingestion priced at ${self.serverless_dbu_usd:.2f}/DBU and gateway "
+                f"compute at ${self.gateway_dbu_usd:.2f}/DBU. These are AWS list prices; they "
+                "vary by region and tier, and list price is not invoiced price."
+            ),
+            (
+                f"Each ingestion run is assumed to consume {self.minutes_per_run:g} minutes of "
+                "serverless compute. Databricks publishes no DBU-per-row or DBU-per-GB "
+                "coefficient, so this is the model's largest source of error."
+            ),
+            (
+                f"A continuously-running gateway is assumed to draw {self.gateway_dbu_per_hour:g} "
+                "DBU/hour. This depends entirely on node sizing and is unverified."
+            ),
+            (
+                f"Classic-compute cloud infrastructure is added at {self.infra_uplift:.0%} on top "
+                "of gateway DBU cost. It never appears in system.billing.usage."
+            ),
+            (
+                f"Fivetran cost is modelled at ${self.fivetran_usd_per_million_mar:,.0f} per "
+                "million MAR. Fivetran publishes no rate card; this is derived from their "
+                "pricing examples and is wrong for Enterprise, Business Critical, and any ELA."
+            ),
+            (
+                "Excluded from both sides: storage, egress, private networking, and downstream "
+                "transformation compute."
+            ),
         ]
 
 

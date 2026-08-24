@@ -10,7 +10,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.costs import (  # noqa: E402
+from ftlfc.costs import (
     HOURS_PER_MONTH,
     RateCard,
     compare,
@@ -71,7 +71,9 @@ class TestRunsPerMonth:
         [(60, 730), (1440, 730 / 24), (30, 1460), (360, 730 / 6)],
     )
     def test_derives_frequency_from_the_fivetran_interval(self, minutes, expected) -> None:
-        assert runs_per_month({"mode": "cron", "fivetran_minutes": minutes}) == pytest.approx(expected)
+        assert runs_per_month({"mode": "cron", "fivetran_minutes": minutes}) == pytest.approx(
+            expected
+        )
 
     def test_continuous_is_billed_as_the_whole_month(self) -> None:
         assert runs_per_month({"mode": "continuous"}) == HOURS_PER_MONTH
@@ -114,7 +116,13 @@ class TestModelLakeflowCost:
         assert hourly > daily
 
     def test_continuous_pipelines_are_called_out(self) -> None:
-        plan = _plan({"blockers": [], "target": {"gateway": "not_required"}, "schedule": {"mode": "continuous"}})
+        plan = _plan(
+            {
+                "blockers": [],
+                "target": {"gateway": "not_required"},
+                "schedule": {"mode": "continuous"},
+            }
+        )
         assert "continuously" in model_lakeflow_cost(plan, RateCard())[0].detail
 
 
