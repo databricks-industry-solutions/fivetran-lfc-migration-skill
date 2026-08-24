@@ -26,6 +26,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-mig
 sys.path.insert(0, str(SCRIPTS))
 
 from ftlfc.bundle import build_bundle
+from ftlfc.catalog import CATALOG
 from ftlfc.mapping import build_plan
 
 jsonschema = pytest.importorskip("jsonschema", reason="jsonschema not installed")
@@ -82,6 +83,45 @@ def test_generated_bundle_matches_dab_schema(dab_schema: dict) -> None:
     assert not errors, "\n".join(
         "/" + "/".join(map(str, e.path)) + " -> " + e.message for e in errors[:20]
     )
+
+
+def _enum_containing(schema: dict, member: str) -> set[str]:
+    """Find the enum in the schema that contains a known member."""
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            values = node.get("enum")
+            if isinstance(values, list) and member in values:
+                found.update(v for v in values if isinstance(v, str))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(schema)
+    return found
+
+
+def test_catalog_connection_types_exist_in_sdk_enum(dab_schema: dict) -> None:
+    """Every connector we claim to target must be a type Databricks recognises.
+
+    A plausible-looking but wrong type (MONDAY for MONDAY_COM, or SALESFORCE for
+    Salesforce Marketing Cloud) survives every other test here and only fails
+    later, against the customer's workspace, when the connection is created.
+    """
+    source_types = _enum_containing(dab_schema, "SALESFORCE")
+    assert source_types, "could not locate IngestionSourceType enum in the bundle schema"
+
+    unknown = sorted(
+        {
+            target.connection_type
+            for target in CATALOG.values()
+            if target.connection_type and target.connection_type not in source_types
+        }
+    )
+    assert not unknown, f"connection types absent from IngestionSourceType: {unknown}"
 
 
 def test_fixture_exercises_both_pipeline_shapes() -> None:

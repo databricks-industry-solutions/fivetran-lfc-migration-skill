@@ -85,6 +85,37 @@ Aha!, Amplitude, Anthropic, Confluence, Microsoft Dynamics 365, GitHub, Gmail, G
 
 > **Documentation inconsistency to flag.** The managed-connector overview page lists **Slack** and **Slack Audit Logs** among connectors that use browser-based OAuth, but neither appears in the managed SaaS connector index. Treat Slack as `unverified` — possibly newly added, possibly stale text.
 
+### 1b-bis. A machine-readable list the docs do not give you
+
+The caveat above says Databricks publishes no consolidated connector matrix. That
+is true of the *documentation*, but the SDK ships an authoritative list of
+connector identifiers that the docs pages do not reproduce:
+
+```bash
+databricks bundle schema | jq -r '.["$defs"]["github.com"].databricks["databricks-sdk-go"]
+  .service["pipelines.IngestionSourceType"].oneOf[0].enum[]' | sort
+```
+
+On CLI v1.1.0 this returns **101 values** against the ~40 connectors named in the
+SaaS index — it includes database, file, streaming, and query-based types, and
+also names connectors absent from the public index entirely (`ORACLE_FUSION_CLOUD`,
+`SAP_SUCCESSFACTORS`, `EPIC_CLARITY`, `GUIDEWIRE`, `VEEVA_VAULT`, and others).
+
+Two caveats on how far to trust it. Enum membership proves the platform knows the
+type; it says **nothing** about release state, so a value here may be Private
+Preview or not yet enabled in a given workspace. And it is the *source type* enum,
+which is output-only on a pipeline — but every connection type observed in a live
+metastore was also a member, so it is the right vocabulary for `connection_type`.
+
+Use it as the authority on **spelling** (`MONDAY_COM`, not `MONDAY`;
+`SALESFORCE_MARKETING_CLOUD`, not `SALESFORCE`) and as a superset for discovering
+connectors, and use the docs index for availability. `tests/test_bundle_schema.py`
+pins every catalog entry against this enum.
+
+Named in the docs index but **absent** from the enum: **Gmail** and **Workiva**.
+Gmail's nearest member, `GOOGLE_WORKSPACE`, is broader than the connector name, so
+both are left unmapped rather than guessed.
+
 ### 1c. Non-managed alternatives for uncovered sources
 
 | Need | Use instead |

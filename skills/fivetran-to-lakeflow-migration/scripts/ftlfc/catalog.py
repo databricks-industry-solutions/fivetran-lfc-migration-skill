@@ -167,6 +167,11 @@ _FEDERATION_ALT = (
     "Federation foreign catalog, or Delta Sharing / Iceberg where a copy is not needed."
 )
 
+_TYPE_ONLY_VERIFIED = (
+    "Connector type confirmed against the SDK IngestionSourceType enum. Release state and "
+    "auth mode were not confirmed, so verify both in the workspace before promising a date."
+)
+
 
 def _saas(
     connection_type: str,
@@ -422,8 +427,33 @@ CATALOG: dict[str, Target] = {
     ),
     "instagram_business": _u2m("META_MARKETING"),
     "salesforce_marketing_cloud": _saas(
-        "SALESFORCE", notes="Distinct managed connector; auth mode unverified."
+        "SALESFORCE_MARKETING_CLOUD", notes="Distinct managed connector; auth mode unverified."
     ),
+    # -- SaaS: connector type confirmed against the SDK enum, auth mode not --
+    #
+    # These are absent from the browser-OAuth-only list Databricks publishes, and
+    # Databricks states most SaaS connections can be created programmatically, so
+    # they are modelled as scriptable. Neither the release state nor the auth mode
+    # was confirmed per connector, so both carry the usual unverified caveat.
+    **{
+        service: _saas(connection_type, notes=_TYPE_ONLY_VERIFIED)
+        for service, connection_type in (
+            ("aha", "AHA"),
+            ("amplitude", "AMPLITUDE"),
+            ("google_search_console", "GOOGLE_SEARCH_CONSOLE"),
+            ("linkedin_ads", "LINKEDIN_ADS"),
+            ("marketo", "MARKETO"),
+            ("monday", "MONDAY_COM"),
+            ("notion", "NOTION"),
+            ("outlook", "OUTLOOK"),
+            ("pagerduty", "PAGERDUTY"),
+            ("pendo", "PENDO"),
+            ("reddit_ads", "REDDIT_ADS"),
+            ("sendgrid", "SENDGRID"),
+            ("square", "SQUARE"),
+            ("zoho_books", "ZOHO_BOOKS"),
+        )
+    },
     # -- No managed connector: a different architecture is the answer -------
     **{
         service: _none(
@@ -472,6 +502,13 @@ CATALOG: dict[str, Target] = {
         ),
     ),
 }
+
+# Deliberately unmapped: the Databricks connector index lists Gmail and Workiva
+# as managed SaaS connectors, but neither has a matching IngestionSourceType in
+# the SDK enum, and Gmail's likeliest match (GOOGLE_WORKSPACE) is broader than
+# the connector name suggests. Guessing either would emit a connection that
+# fails at create time, so they fall through to UNKNOWN, which tells the reader
+# to check the current connector list.
 
 #: Fivetran service ids seen in the wild that have no managed equivalent and no
 #: obvious alternative. Kept explicit so the report can name them rather than
