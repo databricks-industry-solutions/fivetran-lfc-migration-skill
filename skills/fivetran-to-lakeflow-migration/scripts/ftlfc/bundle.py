@@ -1,326 +1,420 @@
 """Emit a Databricks Asset Bundle from a migration plan.
 
-One bundle per migration. Each migratable Fivetran connection becomes:
+The bundle is the deliverable: reviewable YAML the customer keeps, rather than a
+pile of one-shot API calls nobody can audit afterwards.
 
-* a Unity Catalog connection (emitted as reviewable SQL, not as a bundle
-  resource, because credentials must not be committed),
-* an ingestion gateway pipeline, for CDC sources that require one,
-* a managed ingestion pipeline carrying the table selection, SCD type, and
-  column selection discovered from Fivetran,
-* a Lakeflow job that triggers the pipeline on a schedule, when the Fivetran
-  connection was not effectively continuous.
+Three structural facts from the API research shape what gets generated:
 
-Blocked connections are skipped and listed in MIGRATION_NOTES.md.
+- **There is no ``resources.connections``.** Unity Catalog connections cannot be
+  expressed in a bundle at all, so they are emitted as a separate pre-deploy
+  script and referenced by name.
+- **There is no supported pipeline-level schedule.** Both ``trigger.cron`` and
+  pipeline ``continuous`` are deprecated in favour of wrapping the pipeline in a
+  Lakeflow Job, so every ingestion pipeline gets a companion job.
+- **CDC database sources need two pipelines.** A continuous gateway on classic
+  compute, plus a serverless ingestion pipeline that references the gateway by
+  its ``pipeline_id``.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 from typing import Any
 
 import yaml
 
-BUNDLE_YAML = "databricks.yml"
-RESOURCES_DIR = "resources"
-CONNECTIONS_SQL = "connections/create_connections.sql"
-NOTES_FILE = "MIGRATION_NOTES.md"
+# The gateway's workers do not affect throughput; the driver does. Databricks
+# recommends the smallest practical workers with a large driver.
+GATEWAY_DRIVER_NODE = "r5n.16xlarge"
+GATEWAY_WORKER_NODE = "m5n.large"
+
+# Connection types whose UC connection can never be created without a human
+# completing a browser consent flow.
+_MANUAL_CONNECTION_NOTE = (
+    "This connector uses browser-based OAuth only. Create the connection once in the "
+    "Databricks UI, then this bundle will reference it by name."
+)
 
 
-class _BlockStyleDumper(yaml.SafeDumper):
-    """Dumper that indents sequences under their key, matching Databricks docs."""
+class _Dumper(yaml.SafeDumper):
+    """Keeps nested bundle YAML readable by indenting sequences under their key."""
 
-    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
-        super().increase_indent(flow, False)
+    def increase_indent(self, flow: bool = False, indentless: bool = False):  # noqa: ANN201
+        return super().increase_indent(flow, False)
 
 
-def write_bundle(
+def dump_yaml(document: dict[str, Any]) -> str:
+    return yaml.dump(document, Dumper=_Dumper, sort_keys=False, width=100, allow_unicode=True)
+
+
+def build_bundle(
     plan: dict[str, Any],
-    output_dir: Path,
     bundle_name: str,
     host: str | None = None,
-    default_catalog: str | None = None,
-) -> dict[str, Any]:
-    """Materialise the bundle on disk. Returns a summary of what was written."""
-    output_dir = Path(output_dir)
-    (output_dir / RESOURCES_DIR).mkdir(parents=True, exist_ok=True)
-    (output_dir / "connections").mkdir(parents=True, exist_ok=True)
-
-    migratable = [c for c in plan["connections"] if not c["blockers"] and c["objects"]]
-    skipped = [c for c in plan["connections"] if c not in migratable]
-
-    written: list[str] = []
-    for connection in migratable:
-        for filename, document in _resources_for(connection).items():
-            path = output_dir / RESOURCES_DIR / filename
-            path.write_text(_dump(document))
-            written.append(str(path.relative_to(output_dir)))
-
-    (output_dir / BUNDLE_YAML).write_text(
-        _dump(_bundle_document(bundle_name, host, default_catalog or plan["target"]["catalog"]))
-    )
-    written.append(BUNDLE_YAML)
-
-    (output_dir / CONNECTIONS_SQL).write_text(_connections_sql(migratable))
-    written.append(CONNECTIONS_SQL)
-
-    (output_dir / NOTES_FILE).write_text(_notes(plan, migratable, skipped))
-    written.append(NOTES_FILE)
-
-    return {
-        "output_dir": str(output_dir),
-        "files": written,
-        "connections_emitted": len(migratable),
-        "connections_skipped": len(skipped),
-        "pipelines": sum(
-            1 + (1 if c.get("gateway_pipeline_name") else 0) for c in migratable
-        ),
+    notification_email: str | None = None,
+) -> dict[str, str]:
+    """Render a complete bundle as a mapping of relative path -> file contents."""
+    migratable = [i for i in plan["items"] if not i["blockers"]]
+    files: dict[str, str] = {
+        "databricks.yml": dump_yaml(_root(plan, bundle_name, host)),
     }
 
+    for item in migratable:
+        key = item["target"]["pipeline_name"]
+        # One pipeline per .pipeline.yml file, per the CLI's own recommendation,
+        # so the gateway gets its own file rather than sharing the ingestion one.
+        if item["target"]["gateway"] == "required":
+            files[f"resources/{key}_gateway.pipeline.yml"] = dump_yaml(
+                {"resources": {"pipelines": {f"{key}_gateway": _gateway_pipeline(item)}}}
+            )
+        files[f"resources/{key}.pipeline.yml"] = dump_yaml(_pipeline(item, notification_email))
+        files[f"resources/{key}.job.yml"] = dump_yaml(_job(item, notification_email))
 
-def _bundle_document(name: str, host: str | None, catalog: str) -> dict[str, Any]:
-    targets: dict[str, Any] = {
-        "dev": {
-            "mode": "development",
-            "default": True,
-            "variables": {"catalog": catalog},
-        },
-        "prod": {
-            "mode": "production",
-            "variables": {"catalog": catalog},
-        },
-    }
-    if host:
-        targets["dev"]["workspace"] = {"host": host}
-        targets["prod"]["workspace"] = {"host": host}
+    files["scripts/create_connections.sh"] = _connection_script(plan)
+    files["README.md"] = _bundle_readme(plan, bundle_name)
+    return files
+
+
+def _root(plan: dict[str, Any], bundle_name: str, host: str | None) -> dict[str, Any]:
+    catalog = plan["target_catalog"]
+
+    def target(mode: str, dest_catalog: str, **extra: Any) -> dict[str, Any]:
+        # Built fresh per target: sharing one dict makes PyYAML emit an anchor
+        # and an alias, which is valid but confusing in a file humans review.
+        spec: dict[str, Any] = {"mode": mode, **extra}
+        if host:
+            spec["workspace"] = {"host": host}
+        spec["variables"] = {"dest_catalog": dest_catalog}
+        return spec
 
     return {
-        "bundle": {"name": name},
+        "bundle": {"name": bundle_name},
+        "include": ["resources/*.yml"],
         "variables": {
-            "catalog": {
-                "description": "Unity Catalog catalog that ingested tables land in",
+            "dest_catalog": {
+                "description": "Unity Catalog catalog receiving ingested data",
                 "default": catalog,
-            }
+            },
+            "staging_catalog": {
+                "description": "Catalog holding ingestion gateway staging volumes",
+                "default": catalog,
+            },
+            "staging_schema": {
+                "description": "Schema holding ingestion gateway staging volumes",
+                "default": "ingestion_staging",
+            },
         },
-        "include": [f"{RESOURCES_DIR}/*.yml"],
-        "targets": targets,
-    }
-
-
-def _resources_for(connection: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Build the resource documents for one Fivetran connection."""
-    documents: dict[str, dict[str, Any]] = {}
-    pipelines: dict[str, Any] = {}
-    jobs: dict[str, Any] = {}
-
-    gateway_key = connection.get("gateway_pipeline_name")
-    if gateway_key:
-        pipelines[gateway_key] = _gateway_pipeline(connection)
-
-    pipeline_key = connection["pipeline_name"]
-    pipelines[pipeline_key] = _ingestion_pipeline(connection, gateway_key)
-
-    schedule = connection["schedule"]
-    if schedule["mode"] == "triggered" and schedule.get("cron"):
-        jobs[f"{pipeline_key}_schedule"] = _schedule_job(connection, pipeline_key)
-
-    document: dict[str, Any] = {"resources": {"pipelines": pipelines}}
-    if jobs:
-        document["resources"]["jobs"] = jobs
-
-    documents[f"{pipeline_key}.yml"] = document
-    return documents
-
-
-def _gateway_pipeline(connection: dict[str, Any]) -> dict[str, Any]:
-    first = connection["objects"][0]
-    staging_schema = f"{first['destination_schema']}_staging"
-    return {
-        "name": connection["gateway_pipeline_name"],
-        "gateway_definition": {
-            "connection_name": connection["uc_connection_name"],
-            "gateway_storage_catalog": "${var.catalog}",
-            "gateway_storage_schema": staging_schema,
-            "gateway_storage_name": f"{connection['gateway_pipeline_name']}_storage",
+        "targets": {
+            # Development mode prefixes resource names and pauses schedules, so
+            # a dev deploy cannot compete with production for the same source.
+            "dev": target("development", f"{catalog}_dev", default=True),
+            "prod": target("production", catalog),
         },
     }
 
 
-def _ingestion_pipeline(connection: dict[str, Any], gateway_key: str | None) -> dict[str, Any]:
-    ingestion: dict[str, Any] = {}
-    if gateway_key:
-        # The gateway owns the source credentials; the ingestion pipeline points
-        # at the gateway rather than at the UC connection directly.
-        ingestion["ingestion_gateway_id"] = f"${{resources.pipelines.{gateway_key}.id}}"
-    else:
-        ingestion["connection_name"] = connection["uc_connection_name"]
+def _pipeline(item: dict[str, Any], notification_email: str | None) -> dict[str, Any]:
+    target = item["target"]
+    key = target["pipeline_name"]
+    needs_gateway = target["gateway"] == "required"
 
-    source_type = connection["target"].get("source_type")
-    if source_type:
-        ingestion["source_type"] = source_type
-
-    spec_key = connection["target"].get("object_spec") or "table"
-    ingestion["objects"] = [_object_spec(obj, spec_key) for obj in connection["objects"]]
-
-    pipeline: dict[str, Any] = {
-        "name": connection["pipeline_name"],
-        "catalog": "${var.catalog}",
-        "schema": connection["objects"][0]["destination_schema"],
+    ingestion: dict[str, Any] = {
+        "name": f"lfc-{key}-" + "${bundle.target}",
         "serverless": True,
-        "channel": "PREVIEW",
-        "continuous": connection["schedule"]["mode"] == "continuous",
-        "ingestion_definition": ingestion,
+        "channel": "CURRENT",
+        "catalog": "${var.dest_catalog}",
+        "schema": target["destination_schema"],
+        "ingestion_definition": _ingestion_definition(item, needs_gateway, key),
     }
-    return pipeline
+
+    # Salesforce formula fields are enabled by a top-level configuration flag,
+    # not by the private salesforce_include_formula_fields table field.
+    if target["connection_type"] == "SALESFORCE":
+        ingestion["configuration"] = {
+            "pipelines.enableSalesforceFormulaFieldsMVComputation": "true"
+        }
+
+    if notification_email:
+        ingestion["notifications"] = [
+            {
+                "email_recipients": [notification_email],
+                "alerts": ["on-update-failure", "on-update-fatal-failure", "on-flow-failure"],
+            }
+        ]
+
+    return {"resources": {"pipelines": {key: ingestion}}}
 
 
-def _object_spec(obj: dict[str, Any], spec_key: str) -> dict[str, Any]:
-    table_configuration: dict[str, Any] = {"scd_type": obj["scd_type"]}
-    if obj["primary_keys"]:
-        table_configuration["primary_keys"] = obj["primary_keys"]
-    # Lakeflow Connect accepts include_columns or exclude_columns, never both.
-    if obj["include_columns"]:
-        table_configuration["include_columns"] = obj["include_columns"]
-    elif obj["exclude_columns"]:
-        table_configuration["exclude_columns"] = obj["exclude_columns"]
-
-    spec: dict[str, Any] = {
-        "source_schema": obj["source_schema"],
-        "destination_catalog": "${var.catalog}",
-        "destination_schema": obj["destination_schema"],
-        "table_configuration": table_configuration,
-    }
-    if spec_key == "schema":
-        return {"schema": spec}
-
-    spec["source_table"] = obj["source_table"]
-    spec["destination_table"] = obj["destination_table"]
-    if spec_key == "report":
-        spec["source_url"] = "TODO_SET_WORKDAY_RAAS_REPORT_URL"
-        return {"report": spec}
-    return {"table": spec}
-
-
-def _schedule_job(connection: dict[str, Any], pipeline_key: str) -> dict[str, Any]:
+def _gateway_pipeline(item: dict[str, Any]) -> dict[str, Any]:
+    target = item["target"]
     return {
-        "name": f"{connection['pipeline_name']}_schedule",
-        "schedule": {
-            "quartz_cron_expression": connection["schedule"]["cron"],
-            "timezone_id": "UTC",
-            "pause_status": "UNPAUSED",
+        "name": f"lfc-{target['pipeline_name']}-gateway-" + "${bundle.target}",
+        # Gateways must run continuously: if one stops, the source's change log
+        # can be truncated and affected tables need a full refresh.
+        "continuous": True,
+        "serverless": False,
+        "channel": "CURRENT",
+        "catalog": "${var.staging_catalog}",
+        "schema": "${var.staging_schema}",
+        "clusters": [
+            {
+                "label": "default",
+                "driver_node_type_id": GATEWAY_DRIVER_NODE,
+                "node_type_id": GATEWAY_WORKER_NODE,
+                "autoscale": {"min_workers": 1, "max_workers": 4},
+            }
+        ],
+        "gateway_definition": {
+            "connection_name": target["connection_name"],
+            "gateway_storage_catalog": "${var.staging_catalog}",
+            "gateway_storage_schema": "${var.staging_schema}",
+            "gateway_storage_name": f"{target['pipeline_name']}_staging",
         },
+    }
+
+
+def _ingestion_definition(
+    item: dict[str, Any], needs_gateway: bool, key: str
+) -> dict[str, Any]:
+    target = item["target"]
+    definition: dict[str, Any] = {}
+
+    # Exactly one of these is set: a gateway id for CDC sources, a connection
+    # name for everything else.
+    if needs_gateway:
+        definition["ingestion_gateway_id"] = "${resources.pipelines." + key + "_gateway.id}"
+    else:
+        definition["connection_name"] = target["connection_name"]
+
+    # source_type is output-only and ignored on input, so it is deliberately
+    # not emitted here.
+    definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
+    return definition
+
+
+def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    spec: dict[str, Any] = {}
+    kind = obj["type"]
+
+    if kind == "report":
+        spec = {
+            "source_url": obj.get("source_url") or f"REPLACE_WITH_RAAS_URL_FOR_{obj['source_table']}",
+            "destination_catalog": "${var.dest_catalog}",
+            "destination_schema": obj["destination_schema"],
+            "destination_table": obj["destination_table"],
+        }
+    else:
+        spec = {
+            "source_schema": obj["source_schema"],
+            "source_table": obj["source_table"],
+            "destination_catalog": "${var.dest_catalog}",
+            "destination_schema": obj["destination_schema"],
+            "destination_table": obj["destination_table"],
+        }
+
+    config = {k: v for k, v in obj["table_configuration"].items() if v}
+    if config:
+        spec["table_configuration"] = config
+
+    return {kind: spec}
+
+
+def _job(item: dict[str, Any], notification_email: str | None) -> dict[str, Any]:
+    target = item["target"]
+    key = target["pipeline_name"]
+    schedule = item["schedule"]
+
+    job: dict[str, Any] = {
+        "name": f"lfc-{key}-schedule-" + "${bundle.target}",
+        # Fivetran serialises syncs; without this a cron job would not.
+        "max_concurrent_runs": schedule.get("max_concurrent_runs", 1),
         "tasks": [
             {
-                "task_key": "ingest",
-                "pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline_key}.id}}"},
+                "task_key": "run_ingestion",
+                "pipeline_task": {
+                    "pipeline_id": "${resources.pipelines." + key + ".id}",
+                    "full_refresh": False,
+                },
             }
         ],
     }
 
+    if schedule["mode"] == "continuous":
+        job["continuous"] = {"pause_status": "UNPAUSED"}
+    else:
+        job["schedule"] = {
+            "quartz_cron_expression": schedule["quartz_cron_expression"],
+            "timezone_id": schedule.get("timezone_id", "UTC"),
+            "pause_status": "UNPAUSED",
+        }
 
-def _connections_sql(connections: list[dict[str, Any]]) -> str:
-    """Emit CREATE CONNECTION statements with credentials left as placeholders.
+    if notification_email:
+        job["email_notifications"] = {"on_failure": [notification_email]}
 
-    Credentials never enter the repo. Run these by hand, or replace the
-    placeholders with Databricks secret references before running.
+    return {"resources": {"jobs": {f"{key}_schedule": job}}}
+
+
+def _connection_script(plan: dict[str, Any]) -> str:
+    """Emit UC connections as a pre-deploy script.
+
+    Bundles have no resources.connections type, and SQL CREATE CONNECTION does
+    not support Lakeflow Connect managed ingestion types, so this uses the CLI.
     """
     lines = [
-        "-- Unity Catalog connections for the migrated Fivetran sources.",
-        "--",
-        "-- Review every statement before running. Credential values are",
-        "-- placeholders on purpose: fill them in at run time and do not commit them.",
-        "-- OAuth-based sources (Salesforce, Workday, ServiceNow, and similar) may",
-        "-- require the interactive connection wizard in the Databricks UI instead;",
-        "-- see MIGRATION_NOTES.md.",
+        "#!/usr/bin/env bash",
+        "# Create the Unity Catalog connections this bundle references.",
+        "#",
+        "# Bundles cannot express UC connections, and SQL CREATE CONNECTION does not",
+        "# support Lakeflow Connect managed ingestion types. The Connections REST API,",
+        "# via the CLI below, is the supported path.",
+        "#",
+        "# Run this BEFORE `databricks bundle deploy`. Fill in every REPLACE_ME first.",
+        "# Secret option key names are not published; if a create call is rejected, the",
+        "# INVALID_PARAMETER_VALUE error names the keys it actually wants.",
+        "",
+        "set -euo pipefail",
+        "",
+        'PROFILE="${1:-DEFAULT}"',
         "",
     ]
-    for connection in connections:
-        target = connection["target"]
-        connection_type = target.get("connection_type") or "TODO_CONNECTION_TYPE"
-        options = target.get("connection_options") or {}
-        lines.extend(
-            [
-                f"-- {target.get('display_name') or connection['fivetran_service']} "
-                f"(from Fivetran connection {connection['fivetran_connection_id']})",
-                f"CREATE CONNECTION IF NOT EXISTS `{connection['uc_connection_name']}`",
-                f"  TYPE {connection_type}",
-                "  OPTIONS (",
-            ]
-        )
-        option_items = options or {"TODO": "see the connector docs for required options"}
-        rendered = [f"    {key} '{value}'" for key, value in option_items.items()]
-        lines.append(",\n".join(rendered))
-        lines.extend(["  );", ""])
-    return "\n".join(lines)
+
+    seen: set[str] = set()
+    for item in plan["items"]:
+        target = item["target"]
+        name = target["connection_name"]
+        if name in seen or not target["connection_type"]:
+            continue
+        seen.add(name)
+
+        lines.append(f"# -- {item['fivetran']['service']} -> {target['connection_type']} " + "-" * 20)
+
+        if item["blockers"]:
+            lines.append(f"# SKIPPED. {_MANUAL_CONNECTION_NOTE}")
+            for blocker in item["blockers"]:
+                lines.append(f"#   {blocker}")
+            lines.append("")
+            continue
+
+        if target["scriptable"] == "conditional":
+            lines.append("# Conditionally scriptable. " + item["prerequisites"]["auth_note"])
+
+        payload = {
+            "name": name,
+            "connection_type": target["connection_type"],
+            "read_only": True,
+            "options": _connection_options(target["connection_type"]),
+        }
+        body = json.dumps(payload, indent=2)
+        lines.append(f"echo 'Creating connection {name}...'")
+        lines.append(f'databricks connections create --profile "$PROFILE" --json \'{body}\'')
+        lines.append("")
+
+    return "\n".join(lines) + "\n"
 
 
-def _notes(
-    plan: dict[str, Any], migratable: list[dict[str, Any]], skipped: list[dict[str, Any]]
-) -> str:
+# Non-secret option keys observed on real connections of each type. Secret keys
+# are redacted by the API and could not be observed, so they are marked for the
+# operator to supply rather than guessed at.
+_OPTION_HINTS: dict[str, dict[str, str]] = {
+    "SQLSERVER": {"host": "REPLACE_ME", "port": "1433", "user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "POSTGRESQL": {"host": "REPLACE_ME", "port": "5432", "user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "MYSQL": {"host": "REPLACE_ME", "port": "3306", "user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "ORACLE": {
+        "host": "REPLACE_ME",
+        "port": "1521",
+        "service_name": "REPLACE_ME",
+        "user": "REPLACE_ME",
+        "password": "REPLACE_ME",
+    },
+    "TERADATA": {"host": "REPLACE_ME", "port": "1025", "user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "SALESFORCE": {
+        "instance_url": "REPLACE_ME",
+        "is_sandbox": "false",
+        "client_id": "REPLACE_ME",
+        "client_secret": "REPLACE_ME",
+    },
+    "SERVICENOW": {
+        "instance_url": "REPLACE_ME",
+        "client_id": "REPLACE_ME",
+        "client_secret": "REPLACE_ME",
+        "oauth_scope": "useraccount",
+        "user": "REPLACE_ME",
+        "password": "REPLACE_ME",
+    },
+    "WORKDAY_HCM": {
+        "instance_url": "REPLACE_ME",
+        "tenant_name": "REPLACE_ME",
+        "user": "REPLACE_ME",
+        "password": "REPLACE_ME",
+    },
+    "WORKDAY_RAAS": {"user": "REPLACE_ME", "password": "REPLACE_ME"},
+    "NETSUITE": {
+        "host": "REPLACE_ME",
+        "port": "1708",
+        "account_id": "REPLACE_ME",
+        "role_id": "REPLACE_ME",
+        "data_source": "NetSuite2.com",
+    },
+}
+
+
+def _connection_options(connection_type: str) -> dict[str, str]:
+    return _OPTION_HINTS.get(connection_type, {"REPLACE_ME": "see references/lakeflow-connect-api.md"})
+
+
+def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
+    summary = plan["summary"]
+    migratable = [i for i in plan["items"] if not i["blockers"]]
+    blocked = [i for i in plan["items"] if i["blockers"]]
+
     lines = [
-        "# Migration notes",
+        f"# {bundle_name}",
         "",
-        f"Generated from a plan dated {plan['generated_at']}.",
+        "Lakeflow Connect ingestion generated from a Fivetran migration plan.",
         "",
-        "## Before deploying",
+        "## Contents",
         "",
-        "1. Create the Unity Catalog connections in `connections/create_connections.sql`.",
-        "   Pipelines will fail to start until the connection they reference exists.",
-        "2. Complete every source-side prerequisite listed below.",
-        "3. Run `databricks bundle validate` and read the diff.",
-        "4. Deploy to `dev` first and let one full sync complete before `prod`.",
-        "5. Reconcile row counts against the Fivetran-managed tables, then pause the",
-        "   Fivetran connection. Do not delete it until reconciliation passes.",
+        f"- {len(migratable)} ingestion pipeline(s)",
+        f"- {summary['gateways_required']} ingestion gateway(s) for CDC database sources",
+        f"- {len(migratable)} companion job(s), one per pipeline",
+        f"- {summary['tables_total']} table(s) total",
         "",
+        "## Deploy",
+        "",
+        "```bash",
+        "# 1. Create the Unity Catalog connections. Bundles cannot express them.",
+        "./scripts/create_connections.sh <profile>",
+        "",
+        "# 2. Validate. --strict promotes warnings to errors.",
+        "databricks bundle validate --strict -t dev",
+        "",
+        "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules.",
+        "databricks bundle deploy -t dev",
+        "",
+        "# 4. Check what landed, then promote.",
+        "databricks bundle summary -t dev",
+        "databricks bundle deploy -t prod",
+        "```",
+        "",
+        "## Before you deploy",
+        "",
+        "- Fill in every `REPLACE_ME` in `scripts/create_connections.sh`.",
+        "- Gateways run continuously on classic compute and are billed even when the "
+        "ingestion pipeline is idle.",
+        "- A pipeline fails if a destination table already exists, so deploy into a clean "
+        "schema or set `destination_table` explicitly.",
     ]
 
-    prerequisites = [
-        (c, item)
-        for c in migratable
-        for item in (c["source_prerequisites"] + c["manual_steps"])
-    ]
-    if prerequisites:
-        lines.extend(["## Source-side and manual work", ""])
-        for connection, item in prerequisites:
-            lines.append(f"- **{connection['fivetran_service']}**: {item}")
-        lines.append("")
+    if blocked:
+        lines += [
+            "",
+            "## Not included",
+            "",
+            "These Fivetran connections have no automatable path and are absent from this bundle:",
+            "",
+        ]
+        for item in blocked:
+            service = item["fivetran"]["service"]
+            lines.append(f"- **{service}** (`{item['fivetran']['connection_id']}`): {item['blockers'][0]}")
 
-    warnings = [(c, item) for c in migratable for item in c["warnings"]]
-    if warnings:
-        lines.extend(["## Warnings", ""])
-        for connection, item in warnings:
-            lines.append(f"- **{connection['fivetran_service']}**: {item}")
-        lines.append("")
-
-    if skipped:
-        lines.extend(
-            [
-                "## Not migrated",
-                "",
-                "| Fivetran service | Connection | Reason |",
-                "|---|---|---|",
-            ]
-        )
-        for connection in skipped:
-            reason = "; ".join(connection["blockers"]) or "no enabled tables discovered"
-            lines.append(
-                f"| `{connection['fivetran_service']}` "
-                f"| `{connection['fivetran_connection_id']}` | {reason} |"
-            )
-        lines.append("")
-        lines.append(
-            "Keep these on Fivetran, or replace them with a custom Lakeflow "
-            "Declarative Pipeline. Neither is a Lakeflow Connect managed connector today."
-        )
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def _dump(document: dict[str, Any]) -> str:
-    return yaml.dump(
-        document,
-        Dumper=_BlockStyleDumper,
-        sort_keys=False,
-        default_flow_style=False,
-        width=100,
-    )
+    return "\n".join(lines) + "\n"
