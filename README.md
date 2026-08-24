@@ -10,9 +10,10 @@ Lakebridge.
 
 ## Status
 
-All six stages are implemented, with 160 tests. Generated bundles validate
-cleanly against the Databricks Asset Bundle JSON schema emitted by
-`databricks bundle schema` on CLI v1.1.0. They have not yet been through
+All six stages are implemented, with 162 tests. One of those generates a bundle
+from the sample inventory and validates it against the Databricks Asset Bundle
+JSON schema emitted by `databricks bundle schema` (verified on CLI v1.1.0; the
+test skips when the CLI is absent). Bundles have not yet been through
 `databricks bundle validate` against a live workspace, which additionally checks
 that referenced connections and catalogs actually exist.
 

@@ -6,3 +6,6 @@ PyYAML>=6.0.1
 # Development / test only.
 pytest>=8.0.0
 ruff>=0.6.0
+# Checks generated bundles against the schema from `databricks bundle schema`.
+# That test skips when this or the Databricks CLI is absent.
+jsonschema>=4.0.0
