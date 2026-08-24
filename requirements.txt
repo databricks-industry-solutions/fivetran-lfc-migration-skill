@@ -1,0 +1,8 @@
+# Runtime dependencies for the migration scripts.
+# The scripts use only the Python standard library for HTTP so that they can run
+# in a bare environment; PyYAML is the single hard requirement (bundle emission).
+PyYAML>=6.0.1
+
+# Development / test only.
+pytest>=8.0.0
+ruff>=0.6.0

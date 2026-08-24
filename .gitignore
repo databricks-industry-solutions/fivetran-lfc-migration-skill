@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.envrc
+
+# Discovery output can contain customer connection config and credentials metadata.
+out/
+*.inventory.json
+*.plan.json
+!tests/fixtures/**
+
+.databricks/
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+
+# Local virtualenv
+.venv/
