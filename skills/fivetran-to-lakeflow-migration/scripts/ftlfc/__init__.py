@@ -6,6 +6,7 @@ Modules:
     catalog    -- connector capability catalog (Fivetran service -> Lakeflow Connect)
     mapping    -- migration plan builder
     billing    -- Fivetran MAR vs Lakeflow Connect cost model
+    system_tables -- Databricks system table telemetry for rate card enrichment
     bundle     -- Databricks Asset Bundle emitter
 """
 

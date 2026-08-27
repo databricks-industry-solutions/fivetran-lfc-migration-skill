@@ -1,152 +1,405 @@
-# Fivetran → Lakeflow Connect migration skill
+# Fivetran to Lakeflow Connect Migration Skill
 
-An agent skill that migrates a customer's ingestion estate from Fivetran to
-Databricks Lakeflow Connect: discover what they run today, model the cost
-difference, map each connector to its Lakeflow equivalent, and generate plus
-deploy the replacement pipelines as a Databricks Asset Bundle.
+An agent skill that migrates a customer's ingestion estate from **Fivetran** to
+**Databricks Lakeflow Connect**. It discovers what they run today, collects
+billing data, maps each connector to its Lakeflow equivalent, models cost, and
+generates deployable replacement pipelines as a **Databricks Asset Bundle**.
 
-Built for Field Engineering. Intended to be integrated into Genie Code and
-Lakebridge.
+Built for Databricks Field Engineering. Runs in **Claude Code** (plugin) and
+**Genie Code** (agentic orchestration).
 
-## Status
+---
 
-All six stages are implemented, with 163 tests. One of those generates a bundle
-from the sample inventory and validates it against the Databricks Asset Bundle
-JSON schema emitted by `databricks bundle schema` (verified on CLI v1.1.0; the
-test skips when the CLI is absent). Bundles have not yet been through
-`databricks bundle validate` against a live workspace, which additionally checks
-that referenced connections and catalogs actually exist.
+## Table of Contents
 
-| Stage | Script | Produces |
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Pipeline Stages](#pipeline-stages)
+- [Review Gates](#review-gates)
+- [Project Layout](#project-layout)
+- [Genie Code Integration](#genie-code-integration)
+- [Offline / Demo Mode](#offline--demo-mode)
+- [Development](#development)
+- [Design Notes](#design-notes)
+- [References](#references)
+- [License](#license)
+
+---
+
+## Overview
+
+The skill runs a six-stage pipeline. Each stage reads the previous stage's
+artifact and writes its own. All artifacts are JSON files on disk — human-readable,
+diffable, and versionable. Stages 1 through 5 are **read-only** with respect to
+both Fivetran and Databricks.
+
+```
+1.   Discover    ──> inventory.json       (Fivetran API)
+2.   Measure     ──> mar.json             (Platform Connector tables)
+2.5  Telemetry   ──> telemetry.json       (Databricks system tables)
+3.   Map         ──> plan.json            (connector catalog)
+4.   Compare     ──> cost.json            (billing model)
+                     ▓▓ GATE 1 ▓▓         human review
+5.   Generate    ──> bundle/              (Asset Bundle YAML)
+                     ▓▓ GATE 2 ▓▓         human review
+6.   Deploy      ──> live pipelines       (databricks bundle deploy)
+```
+
+Two mandatory **review gates** enforce human approval. The agent stops after
+assessment (scope + cost) and again after conversion (generated bundle). Neither
+gate can be skipped.
+
+---
+
+## Prerequisites
+
+| Requirement | Version | Purpose |
 |---|---|---|
-| 1. Discover | `fivetran_discover.py` | `inventory.json` |
-| 2. Measure | `fivetran_mar.py` | `mar.json` |
-| 3. Map | `plan_migration.py` | `plan.json` |
-| 4. Compare | `compare_cost.py` | `cost.json` |
-| 5. Generate | `generate_bundle.py` | a Databricks Asset Bundle |
-| 6. Deploy | `databricks bundle deploy` | running pipelines |
+| Python | >= 3.10 | All scripts |
+| PyYAML | >= 6.0.1 | Bundle YAML emission (only runtime dependency) |
+| Fivetran API key + secret | — | Stage 1 discovery (Account Settings > API Config) |
+| Databricks CLI | >= 0.200 | Stage 2 MAR queries, stage 2.5 telemetry, stage 6 deploy |
+| Databricks SQL warehouse | — | Stages 2, 2.5, and 4 (optional; CSV and `--print-sql` paths exist) |
 
-**Nothing here has been run against a live Fivetran account.** The Fivetran side
-comes from official documentation and path probing, not observed responses. The
-Databricks side is better grounded: connection types, auth modes, and pipeline
-shapes were validated against 1,662 real connections and live pipeline specs in
-a workspace. Validate against one real Fivetran account before trusting
-generated output.
+Optional for development:
 
-## Layout
+| Requirement | Version | Purpose |
+|---|---|---|
+| pytest | >= 8.0 | Test suite |
+| ruff | >= 0.6 | Linting and formatting |
+| jsonschema | >= 4.0 | Bundle schema validation tests |
 
-```
-skills/fivetran-to-lakeflow-migration/
-├── SKILL.md                    # the skill definition the agent loads
-├── references/                 # loaded on demand, not held in context
-│   ├── fivetran-api.md         # endpoints, MAR, pricing, rate limits
-│   ├── lakeflow-connect-api.md # connections, pipelines, scheduling
-│   ├── connector-coverage.md   # what exists, and source-side prerequisites
-│   └── bundles-and-cost.md     # bundle YAML, billing tables, cost queries
-├── scripts/
-│   ├── fivetran_discover.py    # stage 1
-│   ├── fivetran_mar.py         # stage 2
-│   ├── plan_migration.py       # stage 3
-│   ├── compare_cost.py         # stage 4
-│   ├── generate_bundle.py      # stage 5
-│   └── ftlfc/                  # shared library
-│       ├── fivetran.py         # read-only REST client
-│       ├── inventory.py        # inventory normalisation
-│       ├── mar.py              # MAR and spend collection
-│       ├── catalog.py          # Fivetran service -> Lakeflow target
-│       ├── mapping.py          # migration plan builder
-│       ├── costs.py            # cost comparison
-│       └── bundle.py           # asset bundle emitter
-└── fixtures/                   # sample inventory for offline testing
-tests/                          # pytest suite over the library
-```
+---
 
-## Quick start
+## Installation
+
+### 1. Clone the repository
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
-export S=skills/fivetran-to-lakeflow-migration/scripts
-
-# 1. Discover the estate. Read-only.
-.venv/bin/python $S/fivetran_discover.py --columns -o out/inventory.json
-
-# 2. Collect MAR. Pick whichever path fits the destination warehouse.
-.venv/bin/python $S/fivetran_mar.py --print-sql            # any warehouse
-.venv/bin/python $S/fivetran_mar.py --csv export.csv -o out/mar.json
-
-# 3. Map onto Lakeflow Connect.
-.venv/bin/python $S/plan_migration.py -i out/inventory.json -c main_prod \
-  --mar out/mar.json -o out/plan.json
-
-# 4. Compare cost.
-.venv/bin/python $S/compare_cost.py -p out/plan.json --mar out/mar.json -o out/cost.json
-
-# 5. Generate the bundle.
-.venv/bin/python $S/generate_bundle.py -p out/plan.json -o out/bundle --name acme-lfc
-
-# 6. Deploy.
-cd out/bundle && ./scripts/create_connections.sh <profile>
-databricks bundle validate --strict -t dev && databricks bundle deploy -t dev
+git clone https://github.com/priyal-c/fivetran-lfc-migration-skill.git
+cd fivetran-lfc-migration-skill
 ```
 
-To try it without Fivetran credentials, start from the sample inventory at
-`skills/fivetran-to-lakeflow-migration/fixtures/inventory.sample.json`. Run
-`--help` on any script for full options.
+### 2. Create a virtual environment and install dependencies
 
-## Design notes
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-**Discovery is strictly read-only.** The client issues only GET requests. It
-never calls `POST /schemas/reload`, which looks like a discovery endpoint but
-can change which tables a customer has selected.
+For development (tests + linting):
 
-**Credentials are needed from two places.** The Fivetran REST API gives complete
-topology but exposes no usage data whatsoever — MAR and spend live only in the
-Platform Connector tables inside the customer's destination warehouse. Cost is
-usually the half the customer cares about, so plan for that second credential up
-front rather than discovering it mid-engagement.
+```bash
+pip install -e ".[dev]"
+```
 
-**Fivetran reports only overridden columns.** `GET /connections/{id}/schemas`
-returns columns that were explicitly customised, not the full column list. A
-table with an empty `columns` map is one nobody touched, where every column
-syncs. Exclusions and hashing are therefore reliable, but primary keys are not —
-a key nobody edited never appears. Records carry `primary_keys_known` so later
-stages cannot mistake "unknown" for "none" and emit a pipeline with wrong SCD
-behaviour. Pass `--columns` to resolve them properly.
+### 3. Configure credentials
 
-**Inventory files are customer data.** Secret-looking config values are redacted
-before anything is written, and `out/` is gitignored. Connect Card tokens are
-credentials and are never captured.
+```bash
+export FIVETRAN_API_KEY=<your-api-key>
+export FIVETRAN_API_SECRET=<your-api-secret>
+```
 
-**Support is three independent questions, not one flag.** Whether a managed
-connector exists, whether its connection can be created without a human in a
-browser, and whether the source system's own setup can be scripted. These come
-apart constantly: Workday is scriptable on the Databricks side yet every
-source-side step is a click in the Workday UI, while S3 has no managed connector
-but migrates trivially via Auto Loader. The catalog keeps them separate.
+Get these from the Fivetran dashboard under **Account Settings > API Config**.
+The skill only issues GET requests and never modifies Fivetran state.
 
-**The cost comparison is asymmetric on purpose.** Fivetran spend is measurable.
-Lakeflow Connect spend is not predictable in advance — Databricks publishes no
-DBU-per-row coefficient and recommends benchmarking instead. So the Databricks
-figure is a scenario whose assumptions are printed with every number, and
-measured pilot usage replaces the model entirely when supplied.
+### 4. (Optional) Configure Databricks CLI
+
+Required for stages 2, 2.5, and 6. If the CLI is already configured, no extra
+setup is needed. Otherwise:
+
+```bash
+databricks auth login --profile <profile-name>
+```
+
+---
+
+## Quick Start
+
+```bash
+source .venv/bin/activate
+export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
+S=skills/fivetran-to-lakeflow-migration/scripts
+
+# Stage 1: Discover the Fivetran estate (read-only)
+python3 $S/fivetran_discover.py --columns -o out/inventory.json
+
+# Stage 2: Collect MAR billing data
+python3 $S/fivetran_mar.py --warehouse-id <id> --profile <profile> \
+  -o out/mar.json
+# or: python3 $S/fivetran_mar.py --print-sql   (any warehouse)
+# or: python3 $S/fivetran_mar.py --csv export.csv -o out/mar.json
+
+# Stage 2.5: Ground cost model with Databricks system table telemetry
+python3 $S/databricks_telemetry.py --warehouse-id <id> -o out/telemetry.json
+
+# Stage 3: Map connectors to Lakeflow Connect
+python3 $S/plan_migration.py -i out/inventory.json -c <dest_catalog> \
+  --mar out/mar.json -o out/plan.json
+
+# Stage 4: Compare Fivetran cost vs Lakeflow Connect
+python3 $S/compare_cost.py -p out/plan.json --mar out/mar.json \
+  --telemetry out/telemetry.json -o out/cost.json
+
+# ──── GATE 1: Review assessment before proceeding ────
+
+# Stage 5: Generate Databricks Asset Bundle
+python3 $S/generate_bundle.py -p out/plan.json -o out/bundle \
+  --name <customer>-lfc --host https://<workspace>.cloud.databricks.com
+
+# ──── GATE 2: Review bundle before deploying ────
+
+# Stage 6: Deploy
+cd out/bundle
+./scripts/create_connections.sh <profile>
+databricks bundle validate --strict -t dev
+databricks bundle deploy -t dev
+```
+
+Run `--help` on any script for the full set of options.
+
+---
+
+## Pipeline Stages
+
+### Stage 1: Discover
+
+Calls the Fivetran REST API to inventory all connections, schemas, and tables.
+Pass `--columns` to resolve primary keys (one request per table, rate-limited).
+
+### Stage 2: Measure
+
+Reads MAR (Monthly Active Rows) and spend from the Fivetran Platform Connector
+tables. Supports direct Databricks query, CSV import, or SQL print for other
+warehouses.
+
+### Stage 2.5: Telemetry
+
+Queries `system.billing.list_prices`, `system.billing.usage`, and
+`system.lakeflow.pipelines` to replace hardcoded cost-model defaults with the
+customer's actual DBU rates and any existing Lakeflow pipeline consumption data.
+
+### Stage 3: Map
+
+Maps each Fivetran connector to a Lakeflow Connect target using a catalog of 70+
+service IDs. Classifies every connection by effort level (low / medium / high /
+blocked) across three dimensions: connector availability, connection
+scriptability, and source-side prerequisites.
+
+### Stage 4: Compare
+
+Produces a Fivetran-vs-Lakeflow cost comparison. The Fivetran side is
+measurable; the Lakeflow side is a scenario with stated assumptions. Every
+assumption is printed with every number.
+
+### Stage 5: Generate
+
+Emits a Databricks Asset Bundle with ingestion pipelines, gateway pipelines
+(for CDC sources), companion jobs, and a UC connection creation script.
+
+### Stage 6: Deploy
+
+Validates and deploys the bundle. Includes a five-step cutover protocol with
+parallel-run validation before pausing Fivetran.
+
+---
+
+## Review Gates
+
+### Gate 1 — Assessment Review (after stages 1–4)
+
+The agent presents: estate summary, effort breakdown, blockers, warnings, cost
+comparison with assumptions, and a migration recommendation. The customer may
+narrow scope, re-run with `--columns`, or provide measured pilot data.
+
+### Gate 2 — Conversion Review (after stage 5)
+
+The agent presents: bundle contents, excluded connections, manual steps
+(browser OAuth), and schedule mapping. The customer may adjust schemas,
+frequencies, or table scope.
+
+Neither gate can be skipped. Do not proceed until the customer explicitly
+approves.
+
+---
+
+## Project Layout
+
+```
+fivetran-lfc-migration-skill/
+├── .claude-plugin/
+│   └── plugin.json              # Claude Code plugin manifest
+├── skills/fivetran-to-lakeflow-migration/
+│   ├── SKILL.md                 # Skill definition (Genie Code + Claude Code)
+│   ├── requirements.txt         # Runtime deps for Genie Code upload
+│   ├── references/
+│   │   ├── genie-code.md        # Genie Code integration guide
+│   │   ├── fivetran-api.md      # Fivetran API endpoints and rate limits
+│   │   ├── lakeflow-connect-api.md  # Connection types, pipelines, gateways
+│   │   ├── connector-coverage.md    # Fivetran → LFC mapping with release states
+│   │   └── bundles-and-cost.md      # Bundle YAML, billing tables, cost queries
+│   ├── scripts/
+│   │   ├── fivetran_discover.py     # Stage 1: Discovery
+│   │   ├── fivetran_mar.py          # Stage 2: MAR collection
+│   │   ├── databricks_telemetry.py  # Stage 2.5: System table telemetry
+│   │   ├── plan_migration.py        # Stage 3: Migration planning
+│   │   ├── compare_cost.py          # Stage 4: Cost comparison
+│   │   ├── generate_bundle.py       # Stage 5: Bundle generation
+│   │   ├── preflight.py             # Genie Code environment setup
+│   │   └── ftlfc/                   # Shared library
+│   │       ├── __init__.py
+│   │       ├── fivetran.py          # Read-only Fivetran REST client
+│   │       ├── inventory.py         # Inventory normalization
+│   │       ├── mar.py               # MAR and spend collection
+│   │       ├── catalog.py           # Connector mapping catalog (70+ entries)
+│   │       ├── mapping.py           # Migration plan builder
+│   │       ├── costs.py             # Cost comparison model
+│   │       ├── system_tables.py     # Databricks system table telemetry
+│   │       └── bundle.py            # Asset Bundle emitter
+│   └── fixtures/
+│       └── inventory.sample.json    # Sample data for offline testing
+├── tests/
+│   ├── test_fivetran.py
+│   ├── test_mar.py
+│   ├── test_mapping.py
+│   ├── test_costs.py
+│   ├── test_system_tables.py
+│   ├── test_bundle.py
+│   ├── test_bundle_schema.py
+│   └── test_preflight.py
+├── pyproject.toml               # Project metadata, ruff + pytest config
+├── requirements.txt             # pip requirements (runtime + dev)
+└── README.md
+```
+
+---
+
+## Genie Code Integration
+
+This skill maps to the Genie Code migration framework:
+
+| Genie Code Phase | Skill Stages | Gate | Artifacts |
+|---|---|---|---|
+| **Assessment** | Discover, Measure, Telemetry, Map, Compare | **GATE 1** | `inventory.json`, `mar.json`, `telemetry.json`, `plan.json`, `cost.json` |
+| **Conversion** | Generate | **GATE 2** | `bundle/` |
+| **Data Migration** | Deploy (parallel run) | — | live pipelines |
+| **Reconciliation** | Deploy cutover | — | row-count validation |
+
+**To publish to a workspace:**
+
+```bash
+PROFILE=<profile>
+USER=$(databricks current-user me --profile "$PROFILE" -o json \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['userName'])")
+TARGET="/Users/${USER}/.assistant/skills/fivetran-to-lakeflow-migration"
+
+databricks workspace mkdirs "$TARGET/scripts/ftlfc" --profile "$PROFILE"
+databricks workspace import "$TARGET/SKILL.md" \
+  --file skills/fivetran-to-lakeflow-migration/SKILL.md \
+  --format AUTO --overwrite --profile "$PROFILE"
+# Repeat for requirements.txt, references/*, scripts/*, fixtures/*
+```
+
+See [`references/genie-code.md`](skills/fivetran-to-lakeflow-migration/references/genie-code.md)
+for runtime differences, preflight setup, and troubleshooting.
+
+---
+
+## Offline / Demo Mode
+
+No Fivetran credentials? Start from the sample inventory:
+
+```bash
+S=skills/fivetran-to-lakeflow-migration/scripts
+
+python3 $S/plan_migration.py \
+  -i skills/fivetran-to-lakeflow-migration/fixtures/inventory.sample.json \
+  -c main_prod -o out/plan.json
+
+python3 $S/compare_cost.py -p out/plan.json -o out/cost.json
+
+python3 $S/generate_bundle.py -p out/plan.json -o out/bundle --name demo-lfc
+```
+
+This exercises stages 3 through 5 end-to-end with realistic fixture data.
+
+---
 
 ## Development
 
+### Run tests
+
 ```bash
-.venv/bin/python -m pytest tests/ -q
-.venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .
+source .venv/bin/activate
+python3 -m pytest tests/ -q
 ```
+
+190 tests cover inventory normalization, connector catalog resolution, plan
+generation, cost model arithmetic, system table telemetry, bundle emission,
+and DAB schema validation.
+
+### Lint and format
+
+```bash
+python3 -m ruff check .
+python3 -m ruff format --check .
+```
+
+### Bundle schema validation
+
+One test generates a bundle from the sample inventory and validates it against
+the Databricks Asset Bundle JSON schema from `databricks bundle schema`
+(verified on CLI v1.1.0). The test auto-skips when the CLI is absent.
+
+---
+
+## Design Notes
+
+**Discovery is strictly read-only.** The client issues only GET requests. It
+never calls `POST /schemas/reload`, which can alter which tables a customer has
+selected.
+
+**Credentials are needed from two places.** The Fivetran REST API gives complete
+topology but exposes no usage data. MAR and spend live only in the Platform
+Connector tables inside the customer's destination warehouse.
+
+**Support is three independent questions, not one flag.** Whether a managed
+connector exists, whether its UC connection can be created without a browser,
+and whether the source system's prerequisites can be scripted. These three
+dimensions produce the four effort levels (low / medium / high / blocked).
+
+**The cost comparison is asymmetric on purpose.** Fivetran spend is measurable.
+Lakeflow Connect spend is not predictable in advance — Databricks publishes no
+DBU-per-row coefficient. The Lakeflow figure is a scenario whose assumptions
+are printed with every number. Stage 2.5 grounds as many assumptions as possible
+from system tables; measured pilot usage replaces the model entirely.
+
+**Inventory files are customer data.** Secret-looking config values are redacted
+before anything is written. `out/` is gitignored. Connect Card tokens are
+credentials and are never captured.
+
+---
 
 ## References
 
 Detailed API references live alongside the skill and are loaded on demand:
 
 - [`fivetran-api.md`](skills/fivetran-to-lakeflow-migration/references/fivetran-api.md)
-  — endpoints, response shapes, rate limits, the MAR and pricing model, known gaps.
+  — Fivetran endpoints, response shapes, rate limits, MAR and pricing model
 - [`lakeflow-connect-api.md`](skills/fivetran-to-lakeflow-migration/references/lakeflow-connect-api.md)
-  — connection types and auth modes, `ingestion_definition`, gateways, scheduling.
+  — Connection types, auth modes, `ingestion_definition`, gateways, scheduling
 - [`connector-coverage.md`](skills/fivetran-to-lakeflow-migration/references/connector-coverage.md)
-  — which managed connectors exist, and per-source prerequisites.
+  — Fivetran connector to Lakeflow Connect mapping with release states
 - [`bundles-and-cost.md`](skills/fivetran-to-lakeflow-migration/references/bundles-and-cost.md)
-  — bundle YAML, billing system tables, runnable cost queries.
+  — Bundle YAML patterns, billing system tables, runnable cost queries
+- [`genie-code.md`](skills/fivetran-to-lakeflow-migration/references/genie-code.md)
+  — Genie Code publish, preflight, framework mapping, troubleshooting
+
+---
+
+## License
+
+Internal — Databricks Field Engineering. Not for external distribution.

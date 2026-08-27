@@ -1,0 +1,3 @@
+# Runtime dependency for bundle emission (PyYAML).
+# Scripts otherwise use the Python standard library for HTTP.
+PyYAML>=6.0.1

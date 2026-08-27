@@ -1,20 +1,46 @@
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 .venv/
 venv/
+
+# Environment and credentials
 .env
 .envrc
+*.secret
 
-# Discovery output can contain customer connection config and credentials metadata.
+# Discovery output contains customer connection config
 out/
 *.inventory.json
 *.plan.json
-!tests/fixtures/**
+!skills/fivetran-to-lakeflow-migration/fixtures/**
 
+# Databricks
 .databricks/
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Test and lint caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
 
-# Local virtualenv
-.venv/
+# Cursor / Claude local state
+.cursor/
+.isaac/

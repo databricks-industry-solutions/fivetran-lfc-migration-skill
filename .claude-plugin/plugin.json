@@ -5,6 +5,15 @@
   "author": {
     "name": "Databricks Field Engineering"
   },
-  "keywords": ["databricks", "lakeflow-connect", "fivetran", "migration", "ingestion", "lakebridge"],
+  "keywords": [
+    "databricks",
+    "lakeflow-connect",
+    "fivetran",
+    "migration",
+    "ingestion",
+    "lakebridge",
+    "genie-code",
+    "agentic-orchestration"
+  ],
   "skills": "./skills/"
 }

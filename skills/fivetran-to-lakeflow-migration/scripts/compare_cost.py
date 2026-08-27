@@ -2,12 +2,17 @@
 """Stage 4 - compare Fivetran spend against projected Lakeflow Connect cost.
 
     python3 compare_cost.py -p out/plan.json --mar out/mar.json -o out/cost.json
+    python3 compare_cost.py -p out/plan.json --telemetry out/telemetry.json
     python3 compare_cost.py -p out/plan.json --rates '{"minutes_per_run": 12}'
 
 The Fivetran side is measurable. The Databricks side is not: Databricks
 publishes no DBU-per-row coefficient for managed ingestion, so unless you supply
 measured pilot usage the projection is a scenario built on stated assumptions,
 all of which are printed alongside the result.
+
+If ``--telemetry`` is supplied (from ``databricks_telemetry.py``, stage 2.5),
+the rate card is pre-seeded with observed system-table values. Explicit
+``--rates`` flags take highest priority and override both defaults and telemetry.
 """
 
 from __future__ import annotations
@@ -31,6 +36,12 @@ def main(argv: list[str] | None = None) -> int:
         "--measured",
         type=Path,
         help="JSON array of system.billing.usage rows from a pilot, which replaces the model",
+    )
+    parser.add_argument(
+        "--telemetry",
+        type=Path,
+        help="Telemetry JSON from databricks_telemetry.py (stage 2.5). Its rate_card "
+        "values take priority over defaults but are overridden by --rates.",
     )
     parser.add_argument(
         "--rates", help="JSON object overriding rate card fields, e.g. '{\"minutes_per_run\": 12}'"
@@ -60,7 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     measured = json.loads(args.measured.read_text()) if args.measured else None
 
     try:
-        rates = rate_card_from_overrides(json.loads(args.rates) if args.rates else None)
+        merged_overrides = _merge_rate_overrides(args.telemetry, args.rates)
+        rates = rate_card_from_overrides(merged_overrides)
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -73,6 +85,32 @@ def main(argv: list[str] | None = None) -> int:
 
     _report(comparison, destination)
     return 0
+
+
+def _merge_rate_overrides(
+    telemetry_path: Path | None, rates_json: str | None
+) -> dict | None:
+    """Layer telemetry rate_card under explicit --rates overrides.
+
+    Telemetry values (from system tables) replace defaults, but explicit
+    --rates flags take highest priority so the user can always override.
+    """
+    merged: dict = {}
+    if telemetry_path and telemetry_path.exists():
+        telemetry = json.loads(telemetry_path.read_text())
+        rc = telemetry.get("rate_card", {})
+        merged.update(rc)
+        grounded = telemetry.get("enrichment_log", {}).get("grounded_fields", [])
+        if grounded:
+            logging.info(
+                "Loaded %d grounded rate(s) from telemetry: %s",
+                len(grounded),
+                telemetry_path,
+            )
+    if rates_json:
+        explicit = json.loads(rates_json)
+        merged.update(explicit)
+    return merged or None
 
 
 def _latest_reported_spend(mar_doc: dict, mar: dict | None) -> float | None:
