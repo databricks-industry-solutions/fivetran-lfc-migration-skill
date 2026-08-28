@@ -15,6 +15,8 @@ Built for Databricks Field Engineering. Runs in **Claude Code** (plugin) and
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+  - [Claude Code (laptop)](#claude-code-laptop)
+  - [Genie Code (customer or prospect workspace)](#genie-code-customer-or-prospect-workspace)
 - [Quick Start](#quick-start)
 - [Pipeline Stages](#pipeline-stages)
 - [Review Gates](#review-gates)
@@ -75,14 +77,20 @@ Optional for development:
 
 ## Installation
 
-### 1. Clone the repository
+Pick one runtime. **Claude Code** runs on a laptop against a local clone.
+**Genie Code** runs entirely in the customer's (or prospect's) Databricks
+workspace — no local Python venv required after the skill folder is installed.
+
+### Claude Code (laptop)
+
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/priyal-c/fivetran-lfc-migration-skill.git
 cd fivetran-lfc-migration-skill
 ```
 
-### 2. Create a virtual environment and install dependencies
+#### 2. Create a virtual environment and install dependencies
 
 ```bash
 python3 -m venv .venv
@@ -96,7 +104,7 @@ For development (tests + linting):
 pip install -e ".[dev]"
 ```
 
-### 3. Configure credentials
+#### 3. Configure credentials
 
 ```bash
 export FIVETRAN_API_KEY=<your-api-key>
@@ -106,7 +114,7 @@ export FIVETRAN_API_SECRET=<your-api-secret>
 Get these from the Fivetran dashboard under **Account Settings > API Config**.
 The skill only issues GET requests and never modifies Fivetran state.
 
-### 4. (Optional) Configure Databricks CLI
+#### 4. (Optional) Configure Databricks CLI
 
 Required for stages 2, 2.5, and 6. If the CLI is already configured, no extra
 setup is needed. Otherwise:
@@ -115,9 +123,120 @@ setup is needed. Otherwise:
 databricks auth login --profile <profile-name>
 ```
 
+### Genie Code (customer or prospect workspace)
+
+Use this when the customer wants to run the skill **inside Databricks Genie
+Code Agent mode**, on their workspace identity, with credentials that never
+leave their environment. Field Eng typically uploads the skill; the customer
+runs the chat.
+
+Official skill locations ([Genie Code skills](https://docs.databricks.com/aws/en/genie-code/skills)):
+
+| Scope | Workspace path | Who installs |
+|---|---|---|
+| **User skill** (typical for a POC) | `/Users/<workspace-user>/.assistant/skills/fivetran-to-lakeflow-migration/` | Any user, or FE using that user's CLI profile |
+| **Workspace skill** (shared rollout) | `/Workspace/.assistant/skills/fivetran-to-lakeflow-migration/` | Workspace admin |
+
+Upload the **entire** skill folder: `SKILL.md`, `requirements.txt`,
+`references/`, `scripts/` (including `scripts/ftlfc/`), and `fixtures/`.
+
+#### 1. Prerequisites in the customer workspace
+
+- Genie Code **Agent mode** enabled
+- Permission to write under `.assistant/skills/` (user folder or workspace folder)
+- Fivetran **Account Settings > API Config** key + secret (read-only; Standard plan or above)
+- A SQL warehouse the user can query, if MAR lives in Databricks (stage 2) or for system-table telemetry (stage 2.5)
+- `SELECT` on `system.billing.list_prices` (and related system tables) if you want grounded DBU rates
+
+#### 2. Install the skill folder
+
+**Option A — Databricks CLI (from a machine that already has this repo)**
+
+Target the customer's workspace profile, not an internal FE workspace:
+
+```bash
+cd fivetran-lfc-migration-skill
+SKILL_SRC=skills/fivetran-to-lakeflow-migration
+PROFILE=<customer-workspace-profile>
+
+USER=$(databricks current-user me --profile "$PROFILE" -o json \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['userName'])")
+TARGET="/Users/${USER}/.assistant/skills/fivetran-to-lakeflow-migration"
+
+find "$SKILL_SRC" -type d | while read -r d; do
+  rel="${d#"$SKILL_SRC"/}"
+  dest="$TARGET"
+  [ "$rel" != "$d" ] && dest="$TARGET/$rel"
+  databricks workspace mkdirs "$dest" --profile "$PROFILE"
+done
+
+find "$SKILL_SRC" -type f ! -name '.DS_Store' | while read -r f; do
+  rel="${f#"$SKILL_SRC"/}"
+  databricks workspace import "$TARGET/$rel" \
+    --file "$f" --format AUTO --overwrite --profile "$PROFILE"
+done
+
+databricks workspace list "$TARGET" --profile "$PROFILE"
+databricks workspace list "$TARGET/scripts/ftlfc" --profile "$PROFILE"
+```
+
+For a workspace-wide install, set `TARGET=/Workspace/.assistant/skills/fivetran-to-lakeflow-migration`
+instead (admin required).
+
+**Option B — Workspace UI (customer self-install)**
+
+1. In Genie Code, open **Settings → Open skills folder** (or create
+   `/Users/<you>/.assistant/skills/` in the workspace file browser).
+2. Create a folder named `fivetran-to-lakeflow-migration`.
+3. Import the contents of `skills/fivetran-to-lakeflow-migration/` from the
+   zip or Git checkout FE provided: `SKILL.md`, `requirements.txt`,
+   `references/`, `scripts/`, `fixtures/`. Keep the same relative layout.
+
+Genie Code picks up new skills on the **next** Agent-mode chat. Edits do not
+apply to an already-open chat — start a new one (hard-refresh the tab if the
+description looks stale).
+
+#### 3. Run the skill in Genie Code
+
+1. Open **Genie Code → Agent mode**.
+2. `@` mention `fivetran-to-lakeflow-migration`, or ask in natural language:
+
+   - *Assess our Fivetran estate for Lakeflow Connect migration*
+   - *Migrate Fivetran connectors to Lakeflow Connect*
+   - *Run the Fivetran to Lakeflow Connect skill end to end, stop at each review gate*
+
+3. When asked, set Fivetran credentials **in that session** (do not paste them
+   into notebooks that will be committed):
+
+   ```bash
+   export FIVETRAN_API_KEY=...
+   export FIVETRAN_API_SECRET=...
+   ```
+
+4. Confirm the agent runs **preflight** first (`scripts/preflight.py --export
+   --install-deps`) so `${SCRIPTS}` and `${FTLFC_OUT}` exist. Genie Code does
+   not set `CLAUDE_SKILL_DIR`; each bash step may be a fresh shell.
+5. Stop at **GATE 1** (assessment) and **GATE 2** (generated bundle). Do not
+   deploy until the customer explicitly approves.
+
+Artifacts (`inventory.json`, `plan.json`, `cost.json`, `bundle/`) are written
+under the preflight output directory in the workspace. They are customer data
+— keep them out of shared Git until secrets are confirmed redacted.
+
+**Compute note:** stage 6 (`databricks bundle deploy`) needs the Databricks
+CLI on PATH. Serverless Genie Code often does **not** ship the CLI. For a
+fully in-workspace run, attach Agent mode to a **classic cluster** that has
+the CLI, or run only stages 1–5 in Genie Code and deploy the bundle from a
+laptop or job that already has the CLI.
+
+More runtime detail: [`references/genie-code.md`](skills/fivetran-to-lakeflow-migration/references/genie-code.md).
+
 ---
 
 ## Quick Start
+
+Laptop / Claude Code. For a customer-run Genie Code session, use
+[Installation → Genie Code](#genie-code-customer-or-prospect-workspace) instead.
 
 ```bash
 source .venv/bin/activate
@@ -279,6 +398,9 @@ fivetran-lfc-migration-skill/
 
 ## Genie Code Integration
 
+Install and invoke steps for a customer-run Agent-mode session are under
+[Installation → Genie Code](#genie-code-customer-or-prospect-workspace).
+
 This skill maps to the Genie Code migration framework:
 
 | Genie Code Phase | Skill Stages | Gate | Artifacts |
@@ -288,23 +410,9 @@ This skill maps to the Genie Code migration framework:
 | **Data Migration** | Deploy (parallel run) | — | live pipelines |
 | **Reconciliation** | Deploy cutover | — | row-count validation |
 
-**To publish to a workspace:**
-
-```bash
-PROFILE=<profile>
-USER=$(databricks current-user me --profile "$PROFILE" -o json \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['userName'])")
-TARGET="/Users/${USER}/.assistant/skills/fivetran-to-lakeflow-migration"
-
-databricks workspace mkdirs "$TARGET/scripts/ftlfc" --profile "$PROFILE"
-databricks workspace import "$TARGET/SKILL.md" \
-  --file skills/fivetran-to-lakeflow-migration/SKILL.md \
-  --format AUTO --overwrite --profile "$PROFILE"
-# Repeat for requirements.txt, references/*, scripts/*, fixtures/*
-```
-
 See [`references/genie-code.md`](skills/fivetran-to-lakeflow-migration/references/genie-code.md)
-for runtime differences, preflight setup, and troubleshooting.
+for runtime differences vs Claude Code, preflight, Fivetran MCP, and
+troubleshooting.
 
 ---
 
