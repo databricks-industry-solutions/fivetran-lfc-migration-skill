@@ -142,12 +142,35 @@ def _plan_objects(
         if table.get("primary_keys"):
             config["primary_keys"] = table["primary_keys"]
         elif table.get("primary_keys_known"):
-            # Genuinely no primary key: merge semantics are not available.
-            config["scd_type"] = "APPEND_ONLY"
-            warnings.append(
-                f"{table['source_schema']}.{table['source_table']} has no primary key; "
-                "planned as APPEND_ONLY rather than a merge."
-            )
+            # Fivetran's columns endpoint returned columns but none marked as
+            # a primary key. This can mean two things:
+            #
+            # 1. The source table genuinely has no PK (e.g. event logs).
+            # 2. Fivetran's API metadata is incomplete — the source has a PK
+            #    that Fivetran uses internally but doesn't expose via the
+            #    columns endpoint. PagerDuty is a known example.
+            #
+            # For managed connectors, Lakeflow Connect queries the source
+            # schema directly and will discover PKs on its own. Forcing
+            # APPEND_ONLY because Fivetran's metadata is incomplete produces
+            # worse pipelines than trusting the managed connector's built-in
+            # schema detection. So: keep SCD_TYPE_1 for managed connectors
+            # (omit primary_keys and let the connector detect them), and only
+            # fall back to APPEND_ONLY for non-managed paths where there is no
+            # connector to detect them.
+            if target.has_managed_connector:
+                warnings.append(
+                    f"{table['source_schema']}.{table['source_table']} has no primary key "
+                    "in Fivetran's column metadata, but the managed Lakeflow Connect "
+                    f"connector ({target.connection_type}) will detect keys from the "
+                    "source directly. Keeping SCD_TYPE_1; verify after first sync."
+                )
+            else:
+                config["scd_type"] = "APPEND_ONLY"
+                warnings.append(
+                    f"{table['source_schema']}.{table['source_table']} has no primary key; "
+                    "planned as APPEND_ONLY rather than a merge."
+                )
         else:
             warnings.append(
                 f"{table['source_schema']}.{table['source_table']} has unknown primary keys. "
