@@ -173,22 +173,86 @@ API credentials.
 
 ## Stage 2: Measure (Assessment)
 
-MAR is the unit Fivetran bills on, and no REST endpoint exposes it. It lives in
-the Fivetran Platform Connector's tables inside the customer's destination
-warehouse, so this stage reads it there.
+MAR (Monthly Active Rows) is the unit Fivetran bills on. The Fivetran REST API
+has **no endpoint** for MAR, usage, cost, or credits — this was verified by
+probing nine candidate paths, all returning 404. The only programmatic source is
+the Fivetran **Platform Connector**, which writes usage and billing tables into
+the customer's destination warehouse.
+
+Determine which path applies, then run the corresponding command:
+
+### Path A: Platform Connector lands in Databricks
+
+Query it directly using a SQL warehouse. This is the simplest path — the data
+is already in the Databricks lakehouse.
 
 ```bash
-# Destination is Databricks
 python3 ${SCRIPTS}/fivetran_mar.py --warehouse-id <id> --profile <profile> \
   -o ${FTLFC_OUT}/mar.json
+```
 
-# Destination is Snowflake, BigQuery, or Redshift: hand the SQL to the customer
-python3 ${SCRIPTS}/fivetran_mar.py --print-sql
+### Path B: Platform Connector lands in another warehouse
+
+The Platform Connector often lands in Snowflake, BigQuery, or Redshift —
+wherever the customer's primary Fivetran destination is. The skill can query
+each of these directly so the SA does not need to ask the customer to run SQL
+and export a CSV.
+
+**Snowflake** (requires `pip install snowflake-connector-python`):
+
+```bash
+python3 ${SCRIPTS}/fivetran_mar.py --snowflake \
+  --sf-account <account_identifier> \
+  --sf-user <username> \
+  --sf-database <FIVETRAN_DB> \
+  --sf-warehouse <COMPUTE_WH> \
+  -o ${FTLFC_OUT}/mar.json
+```
+
+Password via `SNOWFLAKE_PASSWORD` env var or `--sf-password`. For SSO use
+`--sf-authenticator externalbrowser`.
+
+**BigQuery** (requires `pip install google-cloud-bigquery`):
+
+```bash
+python3 ${SCRIPTS}/fivetran_mar.py --bigquery \
+  --bq-project <gcp-project-id> \
+  -o ${FTLFC_OUT}/mar.json
+```
+
+Uses application default credentials by default. For a service account pass
+`--bq-credentials-json <path-to-key.json>`.
+
+**Redshift** (requires `pip install boto3`):
+
+```bash
+# Provisioned cluster
+python3 ${SCRIPTS}/fivetran_mar.py --redshift \
+  --rs-cluster <cluster-id> --rs-database <db> --rs-db-user <user> \
+  -o ${FTLFC_OUT}/mar.json
+
+# Serverless
+python3 ${SCRIPTS}/fivetran_mar.py --redshift \
+  --rs-workgroup <workgroup> --rs-database <db> \
+  -o ${FTLFC_OUT}/mar.json
+```
+
+Uses AWS credentials from the environment or `~/.aws/credentials`.
+
+**Manual fallback** — If the SA cannot get direct credentials for any of the
+above, generate the SQL for the customer to run and ingest their CSV export:
+
+```bash
+python3 ${SCRIPTS}/fivetran_mar.py --print-sql          # hand to customer
 python3 ${SCRIPTS}/fivetran_mar.py --csv mar_export.csv -o ${FTLFC_OUT}/mar.json
 ```
 
-If the Platform Connector is not installed, ask for the invoice or contract
-value instead. A known annual number beats any model.
+### Path C: No Platform Connector installed
+
+If the Platform Connector is not installed at all, there is no automated path.
+Ask the customer for their MAR and spend from the Fivetran dashboard
+(Settings → Usage) or their invoice/contract. Pass the numbers to the cost
+model manually. A known annual spend number beats any model estimate.
 
 ## Stage 2.5: Telemetry (Assessment — optional but recommended)
 

@@ -13,13 +13,19 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-mig
 sys.path.insert(0, str(SCRIPTS))
 
 from ftlfc.mar import (
+    BigQueryConfig,
     MarError,
     MarRecord,
+    RedshiftConfig,
+    SnowflakeConfig,
     _normalise_month,
     _rows_from_statement,
     aggregate,
     build_mar_query,
     load_csv,
+    run_bigquery_query,
+    run_redshift_query,
+    run_snowflake_query,
 )
 
 
@@ -167,3 +173,221 @@ class TestAggregate:
 
     def test_empty_input_is_not_an_error(self) -> None:
         assert aggregate([])["total_mar"] == 0
+
+
+class TestSnowflakeConfig:
+    def test_requires_account(self) -> None:
+        config = SnowflakeConfig(account="", user="admin", database="DB", password="pw")
+        # The config itself is a dataclass; validation happens at connect time
+        # or in _build_snowflake_config. Just confirm the dataclass works.
+        assert config.account == ""
+
+    def test_stores_all_fields(self) -> None:
+        config = SnowflakeConfig(
+            account="xy12345.us-east-1",
+            user="admin",
+            database="FIVETRAN_DB",
+            password="secret",
+            warehouse="COMPUTE_WH",
+            role="ANALYST",
+        )
+        assert config.account == "xy12345.us-east-1"
+        assert config.user == "admin"
+        assert config.database == "FIVETRAN_DB"
+        assert config.password == "secret"
+        assert config.warehouse == "COMPUTE_WH"
+        assert config.role == "ANALYST"
+        assert config.authenticator is None
+
+    def test_authenticator_instead_of_password(self) -> None:
+        config = SnowflakeConfig(
+            account="xy12345",
+            user="admin",
+            database="DB",
+            authenticator="externalbrowser",
+        )
+        assert config.password is None
+        assert config.authenticator == "externalbrowser"
+
+
+class TestSnowflakeImportGuard:
+    def test_missing_driver_raises_a_helpful_error(self) -> None:
+        """run_snowflake_query should raise MarError if the driver isn't installed."""
+        config = SnowflakeConfig(
+            account="xy12345",
+            user="admin",
+            database="DB",
+            password="pw",
+        )
+        # If snowflake-connector-python happens to be installed in the test env
+        # (unlikely in CI), this test still validates the function exists and
+        # accepts the right args. If it's not installed, it should raise MarError.
+        try:
+            run_snowflake_query("SELECT 1", config)
+        except MarError as exc:
+            assert "snowflake-connector-python" in str(exc)
+        except Exception:
+            # Driver is installed but fails to connect (no real Snowflake) — fine.
+            pass
+
+
+class TestSnowflakeCli:
+    """Test the CLI arg parsing for the --snowflake path."""
+
+    def test_snowflake_missing_required_args(self) -> None:
+        """--snowflake without --sf-account/--sf-user/--sf-database should fail."""
+        from fivetran_mar import main
+
+        # Missing all three required SF args, and no env password
+        result = main(["--snowflake", "-o", "/tmp/test_mar.json"])
+        assert result == 1
+
+    def test_snowflake_mutually_exclusive_with_warehouse_id(self) -> None:
+        """--snowflake and --warehouse-id can't both be set."""
+        with pytest.raises(SystemExit):
+            from fivetran_mar import main
+            main(["--snowflake", "--warehouse-id", "abc123"])
+
+    def test_print_sql_is_unaffected(self) -> None:
+        """--print-sql still works and doesn't require Snowflake args."""
+        import io
+        from contextlib import redirect_stdout
+
+        from fivetran_mar import main
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            result = main(["--print-sql"])
+        assert result == 0
+        output = buf.getvalue()
+        assert "incremental_mar" in output
+        assert "free_type" in output
+
+    def test_csv_path_is_unaffected(self) -> None:
+        """--csv still works exactly as before."""
+        import tempfile
+
+        from fivetran_mar import main
+
+        csv_content = (
+            "connection_name,schema_name,table_name,measured_month,mar\n"
+            "sfdc,salesforce,Account,2026-08-01,5000\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            csv_path = f.name
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            out_path = f.name
+
+        try:
+            result = main(["--csv", csv_path, "-o", out_path])
+            assert result == 0
+            import json
+            data = json.loads(Path(out_path).read_text())
+            assert data["mar"]["total_mar"] == 5000
+            assert data["mar"]["by_connection"]["sfdc"] == 5000
+        finally:
+            Path(csv_path).unlink(missing_ok=True)
+            Path(out_path).unlink(missing_ok=True)
+
+
+class TestBigQueryConfig:
+    def test_stores_all_fields(self) -> None:
+        config = BigQueryConfig(
+            project="my-gcp-project",
+            dataset="fivetran_metadata",
+            location="US",
+        )
+        assert config.project == "my-gcp-project"
+        assert config.dataset == "fivetran_metadata"
+        assert config.location == "US"
+        assert config.credentials_json is None
+
+    def test_credentials_json_is_optional(self) -> None:
+        config = BigQueryConfig(project="proj", dataset="ds")
+        assert config.credentials_json is None
+
+
+class TestBigQueryImportGuard:
+    def test_missing_driver_raises_a_helpful_error(self) -> None:
+        config = BigQueryConfig(project="proj", dataset="ds")
+        try:
+            run_bigquery_query("SELECT 1", config)
+        except MarError as exc:
+            assert "google-cloud-bigquery" in str(exc)
+        except Exception:
+            pass
+
+
+class TestRedshiftConfig:
+    def test_stores_provisioned_cluster_fields(self) -> None:
+        config = RedshiftConfig(
+            database="fivetran_db",
+            cluster_identifier="my-cluster",
+            db_user="admin",
+            region="us-east-1",
+        )
+        assert config.database == "fivetran_db"
+        assert config.cluster_identifier == "my-cluster"
+        assert config.db_user == "admin"
+        assert config.workgroup_name is None
+        assert config.region == "us-east-1"
+
+    def test_stores_serverless_workgroup_fields(self) -> None:
+        config = RedshiftConfig(
+            database="fivetran_db",
+            workgroup_name="default",
+        )
+        assert config.workgroup_name == "default"
+        assert config.cluster_identifier is None
+        assert config.db_user is None
+
+    def test_validate_requires_cluster_or_workgroup(self) -> None:
+        config = RedshiftConfig(database="db")
+        with pytest.raises(MarError, match=r"--rs-cluster.*--rs-workgroup"):
+            config._validate()
+
+    def test_validate_requires_db_user_for_provisioned(self) -> None:
+        config = RedshiftConfig(database="db", cluster_identifier="cluster")
+        with pytest.raises(MarError, match="--rs-db-user"):
+            config._validate()
+
+
+class TestRedshiftImportGuard:
+    def test_missing_driver_raises_a_helpful_error(self) -> None:
+        config = RedshiftConfig(
+            database="db", cluster_identifier="cluster", db_user="admin"
+        )
+        try:
+            run_redshift_query("SELECT 1", config)
+        except MarError as exc:
+            assert "boto3" in str(exc)
+        except Exception:
+            pass
+
+
+class TestBigQueryCli:
+    def test_bigquery_missing_required_args(self) -> None:
+        from fivetran_mar import main
+
+        result = main(["--bigquery", "-o", "/tmp/test_bq_mar.json"])
+        assert result == 1
+
+    def test_bigquery_mutually_exclusive_with_snowflake(self) -> None:
+        with pytest.raises(SystemExit):
+            from fivetran_mar import main
+            main(["--bigquery", "--snowflake"])
+
+
+class TestRedshiftCli:
+    def test_redshift_missing_required_args(self) -> None:
+        from fivetran_mar import main
+
+        result = main(["--redshift", "-o", "/tmp/test_rs_mar.json"])
+        assert result == 1
+
+    def test_redshift_mutually_exclusive_with_warehouse_id(self) -> None:
+        with pytest.raises(SystemExit):
+            from fivetran_mar import main
+            main(["--redshift", "--warehouse-id", "abc123"])

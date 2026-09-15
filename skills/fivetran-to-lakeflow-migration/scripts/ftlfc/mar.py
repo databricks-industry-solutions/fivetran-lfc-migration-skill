@@ -4,11 +4,14 @@ No Fivetran REST endpoint exposes MAR, usage, cost, or credits. Volume and spend
 have to come from the Fivetran Platform Connector tables, which live in the
 customer's own destination warehouse -- which is often not Databricks.
 
-So this module supports three paths, in decreasing order of convenience:
+So this module supports six paths, in decreasing order of convenience:
 
-1. ``--warehouse databricks`` runs the query directly via the Databricks CLI.
-2. ``--csv`` ingests an export the customer ran themselves, from any warehouse.
-3. ``--print-sql`` emits the query to hand to whoever does have access.
+1. ``--warehouse-id`` runs the query directly via the Databricks CLI.
+2. ``--snowflake`` runs the query directly against Snowflake.
+3. ``--bigquery`` runs the query directly against BigQuery.
+4. ``--redshift`` runs the query directly against Redshift.
+5. ``--csv`` ingests an export the customer ran themselves, from any warehouse.
+6. ``--print-sql`` emits the query to hand to whoever does have access.
 
 Everything downstream consumes the same normalised record shape, so the cost
 model does not care which path produced it.
@@ -251,6 +254,283 @@ def detect_platform_schema(
         "Could not find the Fivetran Platform Connector tables. Looked for "
         f"{' and '.join(PLATFORM_SCHEMAS)}. Confirm the Platform connection exists and "
         "that the warehouse can read it, or supply the schema explicitly with --schema."
+    )
+
+
+# -- Snowflake execution ----------------------------------------------------
+
+
+def _import_snowflake():
+    """Lazy-import snowflake-connector-python so it's not a hard dependency."""
+    try:
+        import snowflake.connector
+        return snowflake.connector
+    except ImportError as exc:
+        raise MarError(
+            "snowflake-connector-python is required for --snowflake. "
+            "Install it with: pip install snowflake-connector-python"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class SnowflakeConfig:
+    """Connection parameters for a Snowflake account."""
+    account: str
+    user: str
+    database: str
+    password: str | None = None
+    authenticator: str | None = None
+    warehouse: str | None = None
+    role: str | None = None
+
+    def connect(self):
+        sf = _import_snowflake()
+        kwargs: dict[str, Any] = {
+            "account": self.account,
+            "user": self.user,
+            "database": self.database,
+        }
+        if self.password:
+            kwargs["password"] = self.password
+        if self.authenticator:
+            kwargs["authenticator"] = self.authenticator
+        if self.warehouse:
+            kwargs["warehouse"] = self.warehouse
+        if self.role:
+            kwargs["role"] = self.role
+        return sf.connect(**kwargs)
+
+
+def run_snowflake_query(sql: str, config: SnowflakeConfig) -> list[dict[str, Any]]:
+    """Execute SQL against Snowflake and return rows as lowercase-keyed dicts.
+
+    Column names are lowercased to match the Databricks path output, so
+    ``load_rows`` works identically for both.
+    """
+    try:
+        conn = config.connect()
+    except Exception as exc:
+        raise MarError(f"Snowflake connection failed: {exc}") from exc
+
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql)
+            if not cursor.description:
+                return []
+            columns = [col[0].lower() for col in cursor.description]
+            return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+    finally:
+        conn.close()
+
+
+def detect_snowflake_platform_schema(config: SnowflakeConfig) -> str:
+    """Find whichever of fivetran_metadata / fivetran_log exists in Snowflake."""
+    for schema in PLATFORM_SCHEMAS:
+        try:
+            run_snowflake_query(
+                f"SELECT 1 FROM {config.database}.{schema}.incremental_mar LIMIT 1",
+                config,
+            )
+            log.info("Found Fivetran Platform Connector data in %s.%s", config.database, schema)
+            return schema
+        except MarError:
+            continue
+    raise MarError(
+        f"Could not find the Fivetran Platform Connector tables in Snowflake database "
+        f"'{config.database}'. Looked for schemas "
+        f"{' and '.join(PLATFORM_SCHEMAS)}. Confirm the Platform connection exists, or "
+        "supply the schema explicitly with --schema."
+    )
+
+
+# -- BigQuery execution ------------------------------------------------------
+
+
+def _import_bigquery():
+    """Lazy-import google-cloud-bigquery so it's not a hard dependency."""
+    try:
+        from google.cloud import bigquery
+        return bigquery
+    except ImportError as exc:
+        raise MarError(
+            "google-cloud-bigquery is required for --bigquery. "
+            "Install it with: pip install google-cloud-bigquery"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class BigQueryConfig:
+    """Connection parameters for a BigQuery project."""
+    project: str
+    dataset: str
+    credentials_json: str | None = None
+    location: str | None = None
+
+    def client(self):
+        bq = _import_bigquery()
+        kwargs: dict[str, Any] = {"project": self.project}
+        if self.credentials_json:
+            import json as _json
+
+            from google.oauth2 import service_account
+            info = _json.loads(self.credentials_json)
+            kwargs["credentials"] = service_account.Credentials.from_service_account_info(info)
+        if self.location:
+            kwargs["location"] = self.location
+        return bq.Client(**kwargs)
+
+
+def run_bigquery_query(sql: str, config: BigQueryConfig) -> list[dict[str, Any]]:
+    """Execute SQL against BigQuery and return rows as lowercase-keyed dicts."""
+    try:
+        client = config.client()
+    except Exception as exc:
+        raise MarError(f"BigQuery connection failed: {exc}") from exc
+
+    try:
+        result = client.query(sql).result()
+        columns = [field.name.lower() for field in result.schema]
+        return [
+            dict(zip(columns, [row[i] for i in range(len(columns))], strict=False))
+            for row in result
+        ]
+    except Exception as exc:
+        raise MarError(f"BigQuery query failed: {exc}") from exc
+
+
+def detect_bigquery_platform_schema(config: BigQueryConfig) -> str:
+    """Find whichever of fivetran_metadata / fivetran_log exists in BigQuery."""
+    for schema in PLATFORM_SCHEMAS:
+        try:
+            run_bigquery_query(
+                f"SELECT 1 FROM `{config.project}.{schema}.incremental_mar` LIMIT 1",
+                config,
+            )
+            log.info(
+                "Found Fivetran Platform Connector data in %s.%s", config.project, schema
+            )
+            return schema
+        except MarError:
+            continue
+    raise MarError(
+        f"Could not find the Fivetran Platform Connector tables in BigQuery project "
+        f"'{config.project}'. Looked for datasets "
+        f"{' and '.join(PLATFORM_SCHEMAS)}. Confirm the Platform connection exists, or "
+        "supply the dataset explicitly with --schema."
+    )
+
+
+# -- Redshift execution ------------------------------------------------------
+
+
+def _import_boto3():
+    """Lazy-import boto3 so it's not a hard dependency."""
+    try:
+        import boto3
+        return boto3
+    except ImportError as exc:
+        raise MarError(
+            "boto3 is required for --redshift. "
+            "Install it with: pip install boto3"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class RedshiftConfig:
+    """Connection parameters for a Redshift cluster or Serverless workgroup."""
+    database: str
+    # Provisioned cluster
+    cluster_identifier: str | None = None
+    db_user: str | None = None
+    # Serverless
+    workgroup_name: str | None = None
+    # Common
+    region: str | None = None
+
+    def _validate(self) -> None:
+        if not self.cluster_identifier and not self.workgroup_name:
+            raise MarError(
+                "Provide either --rs-cluster (provisioned) or --rs-workgroup (serverless)."
+            )
+        if self.cluster_identifier and not self.db_user:
+            raise MarError("--rs-db-user is required when using --rs-cluster (provisioned).")
+
+
+def run_redshift_query(sql: str, config: RedshiftConfig) -> list[dict[str, Any]]:
+    """Execute SQL against Redshift via the Data API and return lowercase-keyed dicts."""
+    config._validate()
+    boto3 = _import_boto3()
+
+    kwargs: dict[str, Any] = {"region_name": config.region} if config.region else {}
+    client = boto3.client("redshift-data", **kwargs)
+
+    exec_params: dict[str, Any] = {"Database": config.database, "Sql": sql}
+    if config.cluster_identifier:
+        exec_params["ClusterIdentifier"] = config.cluster_identifier
+        exec_params["DbUser"] = config.db_user
+    else:
+        exec_params["WorkgroupName"] = config.workgroup_name
+
+    try:
+        response = client.execute_statement(**exec_params)
+        statement_id = response["Id"]
+    except Exception as exc:
+        raise MarError(f"Redshift execute_statement failed: {exc}") from exc
+
+    # Poll until done (Data API is async)
+    import time
+    waiter_delay = 1.0
+    for _ in range(300):
+        desc = client.describe_statement(Id=statement_id)
+        status = desc["Status"]
+        if status == "FINISHED":
+            break
+        if status in ("FAILED", "ABORTED"):
+            raise MarError(
+                f"Redshift query {status}: {desc.get('Error', 'unknown error')}"
+            )
+        time.sleep(waiter_delay)
+        waiter_delay = min(waiter_delay * 1.5, 5.0)
+    else:
+        raise MarError("Redshift query timed out after polling for ~5 minutes.")
+
+    # Fetch results
+    try:
+        result = client.get_statement_result(Id=statement_id)
+        columns = [col["name"].lower() for col in result["ColumnMetadata"]]
+        rows = []
+        for record in result["Records"]:
+            row_values = []
+            for field in record:
+                # Data API returns typed fields like {"stringValue": "..."} or {"longValue": 42}
+                val = next(iter(field.values()))
+                row_values.append(val)
+            rows.append(dict(zip(columns, row_values, strict=False)))
+        return rows
+    except Exception as exc:
+        raise MarError(f"Redshift get_statement_result failed: {exc}") from exc
+
+
+def detect_redshift_platform_schema(config: RedshiftConfig) -> str:
+    """Find whichever of fivetran_metadata / fivetran_log exists in Redshift."""
+    for schema in PLATFORM_SCHEMAS:
+        try:
+            run_redshift_query(
+                f"SELECT 1 FROM {schema}.incremental_mar LIMIT 1",
+                config,
+            )
+            log.info("Found Fivetran Platform Connector data in %s", schema)
+            return schema
+        except MarError:
+            continue
+    raise MarError(
+        f"Could not find the Fivetran Platform Connector tables in Redshift database "
+        f"'{config.database}'. Looked for schemas "
+        f"{' and '.join(PLATFORM_SCHEMAS)}. Confirm the Platform connection exists, or "
+        "supply the schema explicitly with --schema."
     )
 
 
