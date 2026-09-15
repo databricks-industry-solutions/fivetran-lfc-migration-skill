@@ -192,7 +192,7 @@ class TestBuildPlan:
 
     def test_confirmed_absence_of_a_primary_key_becomes_append_only(self) -> None:
         # For non-managed connectors, confirmed no-PK should still be APPEND_ONLY.
-        plan = build_plan(
+        build_plan(
             _inventory(
                 _connection(
                     service="s3",
@@ -216,7 +216,13 @@ class TestBuildPlan:
             _inventory(
                 _connection(
                     service="pagerduty",
-                    objects=[_table(primary_keys=[], primary_keys_known=True)],
+                    objects=[
+                        _table(
+                            source_table="incidents",
+                            primary_keys=[],
+                            primary_keys_known=True,
+                        )
+                    ],
                 )
             ),
             "main_prod",
@@ -330,3 +336,180 @@ class TestSchedule:
     def test_missing_frequency_uses_the_fivetran_default(self) -> None:
         plan = build_plan(_inventory(_connection(sync_frequency_minutes=None)), "main_prod")
         assert plan["items"][0]["schedule"]["quartz_cron_expression"] == CRON_BY_MINUTES[360]
+
+
+class TestSupportedTableFiltering:
+    """Verify that unsupported Fivetran tables are excluded from the plan."""
+
+    def test_supported_tables_pass_through(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="pagerduty",
+                    objects=[
+                        _table(source_table="incidents"),
+                        _table(source_table="teams"),
+                    ],
+                )
+            ),
+            "main_prod",
+        )
+        tables = [o["source_table"] for o in plan["items"][0]["objects"]]
+        assert tables == ["incidents", "teams"]
+
+    def test_unsupported_tables_are_excluded_with_warning(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="pagerduty",
+                    objects=[
+                        _table(source_table="incidents"),
+                        _table(source_table="extension"),
+                        _table(source_table="extension_schema_option"),
+                    ],
+                )
+            ),
+            "main_prod",
+        )
+        item = plan["items"][0]
+        tables = [o["source_table"] for o in item["objects"]]
+        assert "incidents" in tables
+        assert "extension" not in tables
+        assert "extension_schema_option" not in tables
+        assert any("no Lakeflow Connect equivalent" in w for w in item["warnings"])
+        assert any("extension" in w for w in item["warnings"])
+
+    def test_all_tables_unsupported_leaves_empty_objects_list(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="pagerduty",
+                    objects=[
+                        _table(source_table="fake_table_1"),
+                        _table(source_table="fake_table_2"),
+                    ],
+                )
+            ),
+            "main_prod",
+        )
+        item = plan["items"][0]
+        assert len(item["objects"]) == 0
+        assert any("2 Fivetran table(s)" in w for w in item["warnings"])
+
+    def test_tables_dropped_counted_in_summary(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="pagerduty",
+                    objects=[
+                        _table(source_table="incidents"),
+                        _table(source_table="extension"),
+                    ],
+                )
+            ),
+            "main_prod",
+        )
+        assert plan["summary"]["tables_dropped"] >= 1
+
+    def test_connector_without_supported_tables_includes_all(self) -> None:
+        """Connectors with supported_tables=None (dynamic table set) include
+        all Fivetran tables without filtering."""
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="sql_server",
+                    objects=[
+                        _table(source_table="Customers"),
+                        _table(source_table="AnyCustomTable"),
+                    ],
+                )
+            ),
+            "main_prod",
+        )
+        tables = [o["source_table"] for o in plan["items"][0]["objects"]]
+        assert "Customers" in tables
+        assert "AnyCustomTable" in tables
+
+    def test_table_filtering_is_case_insensitive(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="pagerduty",
+                    objects=[_table(source_table="Incidents")],
+                )
+            ),
+            "main_prod",
+        )
+        assert len(plan["items"][0]["objects"]) == 1
+
+    def test_docs_url_included_in_dropped_table_warning(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="pagerduty",
+                    objects=[_table(source_table="extension")],
+                )
+            ),
+            "main_prod",
+        )
+        dropped_warnings = [
+            w for w in plan["items"][0]["warnings"]
+            if "no Lakeflow Connect equivalent" in w
+        ]
+        assert any("pagerduty-reference" in w for w in dropped_warnings)
+
+
+class TestCatalogSupportedTables:
+    """Verify that supported_tables is populated for key connectors."""
+
+    def test_pagerduty_has_supported_tables(self) -> None:
+        target = lookup("pagerduty")
+        assert target.supported_tables is not None
+        assert "incidents" in target.supported_tables
+        assert len(target.supported_tables) == 10
+
+    def test_hubspot_has_supported_tables(self) -> None:
+        target = lookup("hubspot")
+        assert target.supported_tables is not None
+        assert "contacts" in target.supported_tables
+
+    def test_zendesk_has_supported_tables(self) -> None:
+        target = lookup("zendesk")
+        assert target.supported_tables is not None
+        assert "tickets" in target.supported_tables
+
+    def test_jira_has_supported_tables(self) -> None:
+        target = lookup("jira")
+        assert target.supported_tables is not None
+        assert "issues" in target.supported_tables
+
+    def test_github_has_supported_tables(self) -> None:
+        target = lookup("github")
+        assert target.supported_tables is not None
+        assert "pull_requests" in target.supported_tables
+
+    def test_database_connectors_have_no_supported_tables(self) -> None:
+        for service in ("sql_server", "postgres", "mysql", "oracle"):
+            target = lookup(service)
+            assert target.supported_tables is None, (
+                f"{service} should have supported_tables=None (user-defined tables)"
+            )
+
+    def test_salesforce_has_no_supported_tables(self) -> None:
+        target = lookup("salesforce")
+        assert target.supported_tables is None
+
+    def test_all_managed_connectors_have_docs_url_or_notes(self) -> None:
+        from ftlfc.catalog import CATALOG
+        for service, target in CATALOG.items():
+            if target.has_managed_connector:
+                has_context = (
+                    target.docs_url
+                    or target.notes
+                    or target.source_prerequisites
+                    or target.auth_note
+                )
+                assert has_context, (
+                    f"{service} ({target.connection_type}) has no docs_url, notes, "
+                    "auth_note, or source_prerequisites"
+                )

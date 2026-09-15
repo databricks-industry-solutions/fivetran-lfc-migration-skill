@@ -16,6 +16,8 @@ from typing import Any
 from . import PLAN_SCHEMA_VERSION
 from .catalog import Availability, Gateway, Scriptable, Target, lookup
 
+STALENESS_DAYS = 90
+
 # Fivetran attaches sync frequency to the connector. Databricks has no supported
 # pipeline-level schedule, so each pipeline needs a companion job. Quartz format
 # is: seconds minutes hours day-of-month month day-of-week.
@@ -119,7 +121,12 @@ def _plan_connection(
 def _plan_objects(
     connection: dict[str, Any], target: Target, target_catalog: str
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Translate enabled Fivetran tables into Lakeflow object specs."""
+    """Translate enabled Fivetran tables into Lakeflow object specs.
+
+    When the target has a ``supported_tables`` set, only tables in that set are
+    emitted.  Fivetran tables absent from the set are excluded and a warning is
+    generated so the plan clearly reports the coverage gap.
+    """
     warnings: list[str] = []
     if not target.has_managed_connector:
         return [], warnings
@@ -128,9 +135,21 @@ def _plan_objects(
         connection.get("destination_schema") or connection.get("service")
     )
     specs: list[dict[str, Any]] = []
+    dropped: list[str] = []
 
     for table in connection.get("objects", []):
         if not table.get("enabled"):
+            continue
+
+        source_table = table.get("source_table") or ""
+
+        if (
+            target.supported_tables is not None
+            and source_table.lower() not in {t.lower() for t in target.supported_tables}
+        ):
+            dropped.append(
+                f"{table.get('source_schema', '?')}.{source_table}"
+            )
             continue
 
         config: dict[str, Any] = {}
@@ -142,22 +161,6 @@ def _plan_objects(
         if table.get("primary_keys"):
             config["primary_keys"] = table["primary_keys"]
         elif table.get("primary_keys_known"):
-            # Fivetran's columns endpoint returned columns but none marked as
-            # a primary key. This can mean two things:
-            #
-            # 1. The source table genuinely has no PK (e.g. event logs).
-            # 2. Fivetran's API metadata is incomplete — the source has a PK
-            #    that Fivetran uses internally but doesn't expose via the
-            #    columns endpoint. PagerDuty is a known example.
-            #
-            # For managed connectors, Lakeflow Connect queries the source
-            # schema directly and will discover PKs on its own. Forcing
-            # APPEND_ONLY because Fivetran's metadata is incomplete produces
-            # worse pipelines than trusting the managed connector's built-in
-            # schema detection. So: keep SCD_TYPE_1 for managed connectors
-            # (omit primary_keys and let the connector detect them), and only
-            # fall back to APPEND_ONLY for non-managed paths where there is no
-            # connector to detect them.
             if target.has_managed_connector:
                 warnings.append(
                     f"{table['source_schema']}.{table['source_table']} has no primary key "
@@ -177,10 +180,6 @@ def _plan_objects(
                 "Re-run discovery with --columns; SCD behaviour cannot be set safely without them."
             )
 
-        # include_columns and exclude_columns are mutually exclusive, and
-        # exclude is the faithful translation: Fivetran reports the columns
-        # somebody opted out of, leaving everything else (including future
-        # columns) syncing, which is exactly exclude_columns semantics.
         if table.get("excluded_columns"):
             config["exclude_columns"] = table["excluded_columns"]
 
@@ -195,8 +194,6 @@ def _plan_objects(
         specs.append(
             {
                 "type": "report" if target.connection_type == "WORKDAY_RAAS" else "table",
-                # Some connectors address objects under a schema they define
-                # themselves, so Fivetran's schema name must not be carried over.
                 "source_schema": target.fixed_source_schema or table.get("source_schema"),
                 "fivetran_source_schema": table.get("source_schema"),
                 "source_table": table.get("source_table"),
@@ -209,6 +206,28 @@ def _plan_objects(
                 "primary_keys_known": table.get("primary_keys_known", False),
             }
         )
+
+    if dropped:
+        docs_hint = f" See {target.docs_url}" if target.docs_url else ""
+        warnings.append(
+            f"{len(dropped)} Fivetran table(s) have no Lakeflow Connect equivalent "
+            f"in the {target.connection_type} connector and were excluded: "
+            f"{', '.join(sorted(dropped))}.{docs_hint}"
+        )
+
+    if target.supported_tables is not None and target.last_verified:
+        try:
+            verified = dt.date.fromisoformat(target.last_verified)
+            age = (dt.date.today() - verified).days
+            if age > STALENESS_DAYS:
+                docs_suffix = f" {target.docs_url}" if target.docs_url else ""
+                warnings.append(
+                    f"The {target.connection_type} supported-table list was last verified "
+                    f"on {target.last_verified} ({age} days ago). Check the connector "
+                    f"reference for newly added tables.{docs_suffix}"
+                )
+        except ValueError:
+            pass
 
     rewritten = {
         s["fivetran_source_schema"]
@@ -393,11 +412,19 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
     migratable = [i for i in items if not i["blockers"]]
     needs_gateway = [i for i in items if i["target"]["gateway"] == Gateway.REQUIRED.value]
 
+    tables_dropped = sum(
+        1
+        for i in items
+        for w in i.get("warnings", [])
+        if "have no Lakeflow Connect equivalent" in w
+    )
+
     return {
         "connections_total": len(items),
         "connections_migratable": len(migratable),
         "connections_blocked": len(items) - len(migratable),
         "tables_total": sum(len(i["objects"]) for i in items),
+        "tables_dropped": tables_dropped,
         "tables_scd2": sum(
             1
             for i in items
@@ -405,8 +432,6 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
             if o["table_configuration"].get("scd_type") == "SCD_TYPE_2"
         ),
         "gateways_required": len(needs_gateway),
-        # Every pipeline needs a companion job, since Databricks has no
-        # supported pipeline-level schedule.
         "jobs_required": len(migratable),
         "by_effort": by_effort,
         "by_category": by_category,

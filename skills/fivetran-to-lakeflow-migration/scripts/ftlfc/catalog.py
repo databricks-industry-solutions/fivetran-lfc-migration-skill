@@ -93,6 +93,18 @@ class Target:
     #: Fivetran's schema name cannot be carried over.
     fixed_source_schema: str | None = None
     notes: str = ""
+    #: Fixed set of source table names the Lakeflow Connect connector supports.
+    #: ``None`` means the connector supports dynamic/user-defined tables (databases,
+    #: ServiceNow) or the table list has not been cataloged yet.  When populated,
+    #: any Fivetran table NOT in this set is excluded from the generated pipeline
+    #: and flagged as a coverage gap.
+    supported_tables: frozenset[str] | None = None
+    #: URL to the connector reference page listing supported tables.
+    docs_url: str = ""
+    #: ISO date (YYYY-MM-DD) when ``supported_tables`` was last verified against
+    #: the documentation.  The plan emits a staleness warning when this is older
+    #: than 90 days.
+    last_verified: str = ""
 
     @property
     def has_managed_connector(self) -> bool:
@@ -183,6 +195,9 @@ def _saas(
     prereq_auto: bool = True,
     fixed_source_schema: str | None = None,
     notes: str = "",
+    supported_tables: frozenset[str] | None = None,
+    docs_url: str = "",
+    last_verified: str = "",
 ) -> Target:
     return Target(
         connection_type=connection_type,
@@ -195,11 +210,16 @@ def _saas(
         prerequisites_automatable=prereq_auto,
         fixed_source_schema=fixed_source_schema,
         notes=notes,
+        supported_tables=supported_tables,
+        docs_url=docs_url,
+        last_verified=last_verified,
     )
 
 
 def _u2m(connection_type: str, **kwargs) -> Target:
-    return _saas(connection_type, scriptable=Scriptable.NO, auth_note=_U2M, **kwargs)
+    kwargs.setdefault("scriptable", Scriptable.NO)
+    kwargs.setdefault("auth_note", _U2M)
+    return _saas(connection_type, **kwargs)
 
 
 def _none(alternative: str, notes: str = "") -> Target:
@@ -222,6 +242,109 @@ def _federated() -> Target:
         alternative=_FEDERATION_ALT,
     )
 
+
+# ---------------------------------------------------------------------------
+# Supported-table sets for managed SaaS connectors.
+#
+# Each frozenset lists the source table names the Lakeflow Connect connector
+# can ingest.  Fivetran tables not in this set are excluded from the generated
+# pipeline and flagged as a coverage gap.  Database CDC, file, and dynamic-
+# table connectors (ServiceNow, Salesforce) use ``None`` instead -- any table
+# the customer has is potentially valid.
+# ---------------------------------------------------------------------------
+
+_PAGERDUTY_TABLES = frozenset({
+    "incidents", "log_entries", "services", "users", "teams",
+    "priorities", "escalation_policies", "schedules", "oncalls", "audit_records",
+})
+
+_HUBSPOT_TABLES = frozenset({
+    # Marketing Hub
+    "email_events", "email_subscription_change", "marketing_emails",
+    "email_campaign", "email_campaign_list", "email_subscriptions",
+    "form_submissions", "forms",
+    "marketing_campaign_asset", "marketing_campaign_budget",
+    "marketing_campaign_spend", "marketing_campaigns",
+    "marketing_event_list", "marketing_events",
+    # CRM Hub (Beta, behind hubspot_connector_crm_objects preview)
+    "calls", "companies", "contacts", "deals", "emails", "leads",
+    "line_items", "meetings", "notes", "orders", "products", "tasks", "tickets",
+    "deals_pipelines", "owners", "tickets_pipelines",
+})
+
+_ZENDESK_TABLES = frozenset({
+    # Ticketing API
+    "tickets", "ticket_audits", "ticket_comments", "ticket_metric_events",
+    "ticket_skips", "ticket_triggers", "trigger_categories",
+    "side_conversation_events", "users", "user_identities",
+    "organizations", "macros", "deletion_schedules",
+    "account_attributes", "automations", "brands", "brand_agents",
+    "custom_roles", "custom_statuses", "groups", "group_memberships",
+    "group_sla_policies", "locales", "organization_fields",
+    "organization_memberships", "organization_subscriptions",
+    "schedules", "sla_policies", "suspended_tickets", "tags",
+    "ticket_activities", "ticket_fields", "ticket_forms",
+    "ticket_metrics", "user_fields",
+    # Help Center API
+    "articles", "article_attachments", "article_comments",
+    "article_votes", "categories", "sections",
+    # Community API
+    "posts", "post_comments", "post_votes", "topics",
+    # Audit Log API
+    "audit_logs",
+})
+
+_JIRA_TABLES = frozenset({
+    "application_roles", "boards", "issue_comments", "issue_field_values",
+    "issue_fields", "issue_links", "issue_types", "issue_watchers",
+    "issue_worklogs", "issues", "permission_schemes", "priority",
+    "project_board", "project_categories", "project_components",
+    "project_permissions", "project_role_actor", "project_roles",
+    "projects", "resolutions", "security_level", "security_schemes",
+    "sprints", "status", "status_category", "user_group", "users", "version",
+})
+
+_GITHUB_TABLES = frozenset({
+    # Incremental
+    "repositories", "audit_logs", "repo_contents",
+    # Batch
+    "branches", "collaborators", "commits", "deployments",
+    "deployment_statuses", "discussions", "issue_comments", "issues",
+    "labels", "milestones", "org_members",
+    "pull_request_commits", "pull_request_review_comments",
+    "pull_request_reviews", "pull_requests",
+    "releases", "tags", "team_members", "teams", "workflows",
+})
+
+_WORKDAY_HCM_TABLES = frozenset({"workers", "payroll_result"})
+
+_GOOGLE_ADS_TABLES = frozenset({
+    # Resource tables
+    "customer", "campaign", "campaign_budget", "campaign_criterion",
+    "ad_group", "ad_group_criterion", "ad",
+    # Report tables
+    "keyword_report", "search_query_report",
+    "customer_hourly_report", "campaign_hourly_report", "ad_group_hourly_report",
+    "audience_report", "click_report", "landing_page_report",
+    "search_keyword_report",
+    # Event tables
+    "call_view", "lead_form_submission", "local_services_lead",
+})
+
+_LINKEDIN_ADS_TABLES = frozenset({
+    # Entity tables
+    "account_history", "campaign_group_history", "campaign_history",
+    "creative_history", "account_user_history",
+    # Report tables
+    "ad_analytics_by_campaign_report", "ad_analytics_by_creative_report",
+    "monthly_ad_analytics_by_member_company_size_report",
+    "monthly_ad_analytics_by_member_country_report",
+    "monthly_ad_analytics_by_member_industry_report",
+    "monthly_ad_analytics_by_member_job_function_report",
+    "monthly_ad_analytics_by_member_seniority_report",
+})
+
+_VERIFIED_DATE = "2026-09-15"
 
 # Fivetran service id -> Lakeflow Connect target.
 #
@@ -317,6 +440,11 @@ CATALOG: dict[str, Target] = {
             "pipelines.enableSalesforceFormulaFieldsMVComputation, not the private "
             "salesforce_include_formula_fields table field."
         ),
+        docs_url=(
+            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
+            "salesforce-reference"
+        ),
+        last_verified=_VERIFIED_DATE,
     ),
     "salesforce_sandbox": _saas(
         "SALESFORCE",
@@ -326,6 +454,11 @@ CATALOG: dict[str, Target] = {
         prereq=_SALESFORCE_PREREQ,
         prereq_auto=False,
         fixed_source_schema="objects",
+        docs_url=(
+            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
+            "salesforce-reference"
+        ),
+        last_verified=_VERIFIED_DATE,
     ),
     "workday": _saas(
         "WORKDAY_RAAS",
@@ -344,6 +477,12 @@ CATALOG: dict[str, Target] = {
         prereq=_WORKDAY_RAAS_PREREQ,
         prereq_auto=False,
         notes="Distinct connection type from WORKDAY_RAAS. Needs instance_url and tenant_name.",
+        supported_tables=_WORKDAY_HCM_TABLES,
+        docs_url=(
+            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
+            "workday-hcm-reference"
+        ),
+        last_verified=_VERIFIED_DATE,
     ),
     "servicenow": _saas(
         "SERVICENOW",
@@ -355,6 +494,11 @@ CATALOG: dict[str, Target] = {
         ),
         prereq=_SERVICENOW_PREREQ,
         prereq_auto=False,
+        docs_url=(
+            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
+            "servicenow-reference"
+        ),
+        last_verified=_VERIFIED_DATE,
     ),
     **{
         service: _saas(
@@ -414,13 +558,41 @@ CATALOG: dict[str, Target] = {
         prerequisites_automatable=False,
     ),
     # -- SaaS: browser consent required, connection cannot be scripted ------
-    "hubspot": _u2m("HUBSPOT"),
-    "zendesk": _u2m("ZENDESK"),
-    "jira": _u2m("JIRA"),
+    "hubspot": _u2m(
+        "HUBSPOT",
+        supported_tables=_HUBSPOT_TABLES,
+        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/hubspot-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
+    "zendesk": _u2m(
+        "ZENDESK",
+        supported_tables=_ZENDESK_TABLES,
+        docs_url=(
+            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
+            "zendesk-support-reference"
+        ),
+        last_verified=_VERIFIED_DATE,
+    ),
+    "jira": _u2m(
+        "JIRA",
+        supported_tables=_JIRA_TABLES,
+        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/jira-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "confluence": _u2m("CONFLUENCE"),
-    "github": _u2m("GITHUB"),
+    "github": _u2m(
+        "GITHUB",
+        supported_tables=_GITHUB_TABLES,
+        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/github-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "smartsheet": _u2m("SMARTSHEET"),
-    "google_ads": _u2m("GOOGLE_ADS"),
+    "google_ads": _u2m(
+        "GOOGLE_ADS",
+        supported_tables=_GOOGLE_ADS_TABLES,
+        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/google-ads-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "tiktok_ads": _u2m("TIKTOK_ADS"),
     "facebook_ads": _u2m(
         "META_MARKETING", notes="Named Meta Ads in Databricks; covers Facebook and Instagram Ads."
@@ -441,12 +613,10 @@ CATALOG: dict[str, Target] = {
             ("aha", "AHA"),
             ("amplitude", "AMPLITUDE"),
             ("google_search_console", "GOOGLE_SEARCH_CONSOLE"),
-            ("linkedin_ads", "LINKEDIN_ADS"),
             ("marketo", "MARKETO"),
             ("monday", "MONDAY_COM"),
             ("notion", "NOTION"),
             ("outlook", "OUTLOOK"),
-            ("pagerduty", "PAGERDUTY"),
             ("pendo", "PENDO"),
             ("reddit_ads", "REDDIT_ADS"),
             ("sendgrid", "SENDGRID"),
@@ -454,6 +624,20 @@ CATALOG: dict[str, Target] = {
             ("zoho_books", "ZOHO_BOOKS"),
         )
     },
+    "pagerduty": _saas(
+        "PAGERDUTY",
+        availability=Availability.BETA,
+        supported_tables=_PAGERDUTY_TABLES,
+        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/pagerduty-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
+    "linkedin_ads": _saas(
+        "LINKEDIN_ADS",
+        notes=_TYPE_ONLY_VERIFIED,
+        supported_tables=_LINKEDIN_ADS_TABLES,
+        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/linkedin-ads-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     # -- No managed connector: a different architecture is the answer -------
     **{
         service: _none(
