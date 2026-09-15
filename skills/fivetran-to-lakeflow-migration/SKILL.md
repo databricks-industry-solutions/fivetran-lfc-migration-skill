@@ -35,7 +35,7 @@ and ends with customer-led reconciliation.
 | **Assessment** | 1 Discover, 2 Measure, 2.5 Telemetry, 3 Map, 4 Compare | **GATE 1** | `inventory.json`, `mar.json`, `telemetry.json`, `plan.json`, `cost.json` |
 | **Conversion** | 5 Generate | **GATE 2** | `bundle/` |
 | **Data Migration** | 6 Deploy (parallel run) | — | live Lakeflow Connect pipelines |
-| **Reconciliation** | 6 Deploy steps 2–5 | — | row-count validation, pause Fivetran |
+| **Reconciliation** | 6 Deploy steps 2–5 (customer-owned) | — | row-count validation, customer pauses Fivetran |
 
 ```
 1.   Discover    ${SCRIPTS}/fivetran_discover.py     -> inventory.json   ┐
@@ -382,6 +382,10 @@ had blockers are absent from the bundle by design and listed in its README.
 
 ## Stage 6: Deploy (Data Migration + Reconciliation)
 
+The agent's role ends after deploying the bundle. Everything below is a
+**customer-owned cutover checklist** — the agent does not execute these steps
+and has no write access to Fivetran.
+
 ```bash
 cd ${FTLFC_OUT}/bundle
 ./scripts/create_connections.sh <profile>      # once, per workspace
@@ -389,14 +393,15 @@ databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
 ```
 
-Then cut over in this order, and do not compress it:
+Then the customer cuts over in this order (do not compress it):
 
 1. Deploy to `dev` and let one full sync complete.
 2. **Reconcile** row counts and spot-check values against the Fivetran-managed
-   tables. The customer does this, not you.
+   tables. This is the customer's responsibility.
 3. Deploy to `prod` and run both pipelines in parallel for at least one full
    business cycle.
-4. Pause the Fivetran connection. Do not delete it.
+4. **Customer action:** Pause the Fivetran connection. Do not delete it.
+   The skill has no Fivetran write APIs and cannot do this automatically.
 5. Delete only after the customer confirms reconciliation over a period they
    choose.
 
