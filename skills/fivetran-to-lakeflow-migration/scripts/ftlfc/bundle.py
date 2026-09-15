@@ -184,9 +184,34 @@ def _ingestion_definition(item: dict[str, Any], needs_gateway: bool, key: str) -
     else:
         definition["connection_name"] = target["connection_name"]
 
-    # source_type is output-only and ignored on input, so it is deliberately
-    # not emitted here.
-    definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
+    # For managed SaaS connectors whose supported-table set is cataloged, omit
+    # the explicit objects list and let the connector auto-discover its tables
+    # from the source.  This avoids runtime failures from Fivetran tables that
+    # the Lakeflow connector doesn't support, and picks up any new tables the
+    # connector adds in the future.  The plan still reports which Fivetran
+    # tables have no Lakeflow equivalent.
+    #
+    # Database CDC and gateway sources keep the explicit list because their
+    # tables are user-defined and the plan's filtering does not apply.
+    if (
+        target.get("category") == "saas_managed"
+        and target.get("has_supported_tables")
+        and not needs_gateway
+    ):
+        definition["objects"] = [
+            {
+                "schema": {
+                    "source_schema": item["objects"][0]["source_schema"]
+                    if item["objects"]
+                    else "default",
+                    "destination_catalog": "${var.dest_catalog}",
+                    "destination_schema": target["destination_schema"],
+                }
+            }
+        ]
+    else:
+        definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
+
     return definition
 
 

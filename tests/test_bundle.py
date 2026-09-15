@@ -273,3 +273,58 @@ class TestBlockedConnections:
         files = build_bundle(plan, "acme")
         assert "resources/good.pipeline.yml" in files
         assert "resources/bad.pipeline.yml" not in files
+
+
+class TestAutoDiscoverForManagedSaas:
+    """When a managed SaaS connector has a cataloged supported-table list,
+    the bundle should emit a schema-level ingestion spec (auto-discover)
+    rather than an explicit per-table objects list."""
+
+    def _item_with_supported_tables(self, **overrides) -> dict:
+        item = _item(**overrides)
+        item["target"]["has_supported_tables"] = True
+        return item
+
+    def test_saas_with_supported_tables_emits_schema_level_object(self) -> None:
+        item = self._item_with_supported_tables(connection_type="PAGERDUTY")
+        files = build_bundle(_plan(item), "acme")
+        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
+            "sales_abc"
+        ]
+        objects = pipeline["ingestion_definition"]["objects"]
+        assert len(objects) == 1
+        assert "schema" in objects[0]
+        assert "table" not in objects[0]
+        assert objects[0]["schema"]["destination_catalog"] == "${var.dest_catalog}"
+
+    def test_saas_without_supported_tables_emits_explicit_objects(self) -> None:
+        item = _item()
+        files = build_bundle(_plan(item), "acme")
+        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
+            "sales_abc"
+        ]
+        objects = pipeline["ingestion_definition"]["objects"]
+        assert "table" in objects[0]
+        assert "schema" not in objects[0]
+
+    def test_gateway_source_keeps_explicit_objects_even_with_supported_tables(self) -> None:
+        item = self._item_with_supported_tables(
+            connection_type="SQLSERVER", gateway="required"
+        )
+        item["target"]["category"] = "database_cdc"
+        files = build_bundle(_plan(item), "acme")
+        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
+            "sales_abc"
+        ]
+        objects = pipeline["ingestion_definition"]["objects"]
+        assert "table" in objects[0]
+
+    def test_auto_discover_uses_source_schema_from_objects(self) -> None:
+        item = self._item_with_supported_tables(connection_type="PAGERDUTY")
+        item["objects"][0]["source_schema"] = "default"
+        files = build_bundle(_plan(item), "acme")
+        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
+            "sales_abc"
+        ]
+        schema_spec = pipeline["ingestion_definition"]["objects"][0]["schema"]
+        assert schema_spec["source_schema"] == "default"

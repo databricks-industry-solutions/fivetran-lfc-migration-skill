@@ -109,6 +109,7 @@ def _plan_connection(
             "destination_catalog": target_catalog,
             "destination_schema": to_identifier(connection.get("destination_schema") or service),
             "alternative": target.alternative,
+            "has_supported_tables": target.supported_tables is not None,
         },
         "objects": objects,
         "schedule": schedule,
