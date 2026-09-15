@@ -5,8 +5,7 @@ An agent skill that migrates a customer's ingestion estate from **Fivetran** to
 billing data, maps each connector to its Lakeflow equivalent, models cost, and
 generates deployable replacement pipelines as a **Databricks Asset Bundle**.
 
-Built for Databricks Field Engineering. Runs in **Claude Code** (plugin) and
-**Genie Code** (agentic orchestration).
+Built for **Claude Code** (plugin) and **Genie Code** (agentic orchestration).
 
 ---
 
@@ -127,14 +126,13 @@ databricks auth login --profile <profile-name>
 
 Use this when the customer wants to run the skill **inside Databricks Genie
 Code Agent mode**, on their workspace identity, with credentials that never
-leave their environment. Field Eng typically uploads the skill; the customer
-runs the chat.
+leave their environment.
 
 Official skill locations ([Genie Code skills](https://docs.databricks.com/aws/en/genie-code/skills)):
 
 | Scope | Workspace path | Who installs |
 |---|---|---|
-| **User skill** (typical for a POC) | `/Users/<workspace-user>/.assistant/skills/fivetran-to-lakeflow-migration/` | Any user, or FE using that user's CLI profile |
+| **User skill** (typical for a POC) | `/Users/<workspace-user>/.assistant/skills/fivetran-to-lakeflow-migration/` | Any user |
 | **Workspace skill** (shared rollout) | `/Workspace/.assistant/skills/fivetran-to-lakeflow-migration/` | Workspace admin |
 
 Upload the **entire** skill folder: `SKILL.md`, `requirements.txt`,
@@ -152,12 +150,12 @@ Upload the **entire** skill folder: `SKILL.md`, `requirements.txt`,
 
 **Option A — Databricks CLI (from a machine that already has this repo)**
 
-Target the customer's workspace profile, not an internal FE workspace:
+Target the workspace where the skill will run:
 
 ```bash
 cd fivetran-lfc-migration-skill
 SKILL_SRC=skills/fivetran-to-lakeflow-migration
-PROFILE=<customer-workspace-profile>
+PROFILE=<workspace-profile>
 
 USER=$(databricks current-user me --profile "$PROFILE" -o json \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['userName'])")
@@ -189,7 +187,7 @@ instead (admin required).
    `/Users/<you>/.assistant/skills/` in the workspace file browser).
 2. Create a folder named `fivetran-to-lakeflow-migration`.
 3. Import the contents of `skills/fivetran-to-lakeflow-migration/` from the
-   zip or Git checkout FE provided: `SKILL.md`, `requirements.txt`,
+   zip or Git checkout: `SKILL.md`, `requirements.txt`,
    `references/`, `scripts/`, `fixtures/`. Keep the same relative layout.
 
 Genie Code picks up new skills on the **next** Agent-mode chat. Edits do not
@@ -510,4 +508,4 @@ Detailed API references live alongside the skill and are loaded on demand:
 
 ## License
 
-Internal — Databricks Field Engineering. Not for external distribution.
+Apache 2.0

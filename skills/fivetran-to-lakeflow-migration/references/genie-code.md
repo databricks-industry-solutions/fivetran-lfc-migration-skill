@@ -23,7 +23,7 @@ Genie Code loads skills from:
 /Workspace/Users/<userName>/.assistant/skills/fivetran-to-lakeflow-migration/
 ```
 
-Upload the **entire** skill folder (`SKILL.md`, `requirements.txt`, `references/`, `scripts/`, `fixtures/`). Use the internal `sync-skill-to-genie` skill or the Databricks CLI:
+Upload the **entire** skill folder (`SKILL.md`, `requirements.txt`, `references/`, `scripts/`, `fixtures/`). Use the Databricks CLI:
 
 ```bash
 PROFILE=<profile>
@@ -67,21 +67,21 @@ export FTLFC_OUT='…'
 
 All stage commands then use `${SCRIPTS}/fivetran_discover.py` and write artifacts under `${FTLFC_OUT}/`.
 
-## Fivetran MCP alternative (internal Databricks tenant)
+## Fivetran MCP alternative
 
-When the Fivetran MCP is configured (`isaac mcp add fivetran` or Cursor `user-fivetran`), Stage 1 discovery can use MCP read tools instead of `fivetran_discover.py`:
+When the Fivetran MCP is configured (e.g. via Cursor `user-fivetran`), Stage 1 discovery can use MCP read tools instead of `fivetran_discover.py`:
 
 - `fivetran_list_groups` / `fivetran_list_connections_in_group`
 - `fivetran_get_connection` / `fivetran_get_connection_schema_config`
 - `fivetran_get_connection_column_config` (per table, when `--columns` equivalent is needed)
 
-Build `inventory.json` from MCP responses using the schema in `references/fivetran-api.md`, or run `fivetran_discover.py` after exporting API credentials. Internal groups (from dbi `_workspace-config`): `cession_trample` (CLF), `leotard_abstracted` (SOX), `naval_celtic` (Secfood).
+Build `inventory.json` from MCP responses using the schema in `references/fivetran-api.md`, or run `fivetran_discover.py` after exporting API credentials.
 
 ## Orchestration with other migration skills
 
 - **Warehouse assessment/conversion:** `lakehouse-migrator` skills (Vertica, Hive, etc.) — run in parallel; ingestion migration is independent.
 - **Dashboard migration:** built-in Genie Code `tableauMigrationAgent` / `powerBIMigrationAgent` — different track.
-- **Post-migration ETL:** after Lakeflow lands bronze, use `dbi` ingest-lakeflow to generate omni-configs for the internal 3PI framework.
+- **Post-migration ETL:** after Lakeflow lands bronze, use downstream transformation frameworks to build silver/gold layers.
 
 ## Troubleshooting
 

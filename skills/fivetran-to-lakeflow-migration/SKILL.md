@@ -195,7 +195,7 @@ python3 ${SCRIPTS}/fivetran_mar.py --warehouse-id <id> --profile <profile> \
 
 The Platform Connector often lands in Snowflake, BigQuery, or Redshift —
 wherever the customer's primary Fivetran destination is. The skill can query
-each of these directly so the SA does not need to ask the customer to run SQL
+each of these directly without needing to ask the customer to run SQL
 and export a CSV.
 
 **Snowflake** (requires `pip install snowflake-connector-python`):
@@ -239,7 +239,7 @@ python3 ${SCRIPTS}/fivetran_mar.py --redshift \
 
 Uses AWS credentials from the environment or `~/.aws/credentials`.
 
-**Manual fallback** — If the SA cannot get direct credentials for any of the
+**Manual fallback** — If direct credentials are not available for any of the
 above, generate the SQL for the customer to run and ingest their CSV export:
 
 ```bash

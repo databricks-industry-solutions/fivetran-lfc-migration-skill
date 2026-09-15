@@ -6,7 +6,7 @@
 | Claim type | How it was verified |
 | --- | --- |
 | Bundle YAML field names | `databricks bundle schema` from **Databricks CLI v1.1.0** installed locally (authoritative — this is the JSON Schema the CLI validates against) |
-| Billing field values, SKUs, prices | **Live queries** against `system.billing.usage`, `system.billing.list_prices`, `system.lakeflow.*` on an AWS **Enterprise**-tier workspace (`e2-demo-field-eng`, us-west-oregon) |
+| Billing field values, SKUs, prices | **Live queries** against `system.billing.usage`, `system.billing.list_prices`, `system.lakeflow.*` on an AWS **Enterprise**-tier workspace |
 | Everything else | docs.databricks.com (URLs inline) |
 
 Anything I could not confirm is flagged **`[VERIFY]`**.
@@ -528,7 +528,7 @@ So:
 | **Downstream DLT/ETL pipelines** you write on top | Serverless or classic | DLT Core/Pro/Advanced | **No** — `billing_origin_product = 'DLT'` |
 | **Cloud VM cost of the gateway** | Classic | Not in `system.billing.usage` at all | **No** — see 2.4 |
 
-Two things worth internalizing:
+Two things worth noting:
 
 1. **The DBU rate for managed connector ingestion is the serverless-jobs rate**, not a DLT rate. Lakeflow Connect is not "DLT with a different label" from a pricing standpoint; the SaaS/query-based path is priced as serverless jobs compute.
 2. **The gateway is priced as DLT Advanced.** That is a *different, lower* per-DBU rate than serverless jobs, but it runs on classic compute and therefore also carries a cloud VM bill that never shows up in `system.billing.usage`.

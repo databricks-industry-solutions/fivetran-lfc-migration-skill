@@ -3,7 +3,7 @@
   "description": "Migrate Fivetran ingestion pipelines to Databricks Lakeflow Connect: discover the existing Fivetran setup, compare cost, map connectors, and generate plus deploy equivalent Lakeflow Connect pipelines",
   "version": "0.1.0",
   "author": {
-    "name": "Databricks Field Engineering"
+    "name": "Databricks"
   },
   "keywords": [
     "databricks",

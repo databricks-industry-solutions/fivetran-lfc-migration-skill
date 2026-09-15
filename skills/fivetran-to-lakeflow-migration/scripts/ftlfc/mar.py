@@ -171,7 +171,7 @@ def run_databricks_query(
     """Execute SQL through the Databricks CLI and return rows as dicts.
 
     Uses the CLI rather than a SQL driver so the skill inherits whatever auth
-    the SA already has configured, with no extra dependency.
+    is already configured, with no extra dependency.
     """
     payload = {
         "statement": sql,
