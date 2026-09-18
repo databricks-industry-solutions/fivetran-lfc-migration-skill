@@ -85,7 +85,7 @@ workspace — no local Python venv required after the skill folder is installed.
 #### 1. Clone the repository
 
 ```bash
-git clone https://github.com/priyal-c/fivetran-lfc-migration-skill.git
+git clone https://github.com/databricks-industry-solutions/fivetran-lfc-migration-skill.git
 cd fivetran-lfc-migration-skill
 ```
 
