@@ -371,3 +371,34 @@ class TestAutoDiscoverForManagedSaas:
         ]
         schema_spec = pipeline["ingestion_definition"]["objects"][0]["schema"]
         assert schema_spec["source_schema"] == "default"
+
+
+def _reused(scriptable: str = "yes", verified: bool = False) -> dict:
+    item = _item(key="pd", connection_type="PAGERDUTY", scriptable=scriptable)
+    item["target"]["connection_name"] = "pd_prod"
+    item["target"]["connection_source"] = "existing"
+    item["target"]["connection_verified"] = verified
+    return item
+
+
+class TestReusedConnections:
+    def test_script_neither_creates_nor_modifies_a_reused_connection(self) -> None:
+        script = build_bundle(_plan(_reused()), "acme")["scripts/create_connections.sh"]
+        assert "EXISTING. Reusing 'pd_prod'" in script
+        assert "databricks connections create" not in script
+
+    def test_pipeline_references_the_reused_connection_by_name(self) -> None:
+        files = build_bundle(_plan(_reused()), "acme")
+        pipeline = _load(files, "resources/pd.pipeline.yml")["resources"]["pipelines"]["pd"]
+        assert pipeline["ingestion_definition"]["connection_name"] == "pd_prod"
+
+    def test_reused_browser_oauth_connection_is_not_a_manual_step(self) -> None:
+        files = build_bundle(_plan(_reused(scriptable="no")), "acme")
+        assert "MANUAL" not in files["scripts/create_connections.sh"]
+        assert "## Manual connections" not in files["README.md"]
+
+    @pytest.mark.parametrize("verified,label", [(True, "yes"), (False, "not checked")])
+    def test_readme_lists_reused_connections(self, verified: bool, label: str) -> None:
+        readme = build_bundle(_plan(_reused(verified=verified)), "acme")["README.md"]
+        assert "## Existing connections" in readme
+        assert f"| `pd_prod` | PAGERDUTY | {label} |" in readme

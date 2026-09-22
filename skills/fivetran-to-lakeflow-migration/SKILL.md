@@ -69,8 +69,11 @@ Present the following to the customer before any bundle is generated:
 3. **Blockers** — every blocker from `plan.json`, with the connection name and
    the concrete obstacle. If any connection is `blocked`, explain the
    `alternative` field (Auto Loader, federation, streaming source).
-4. **Warnings** — unknown primary keys, hashed columns, private networking,
-   browser-only OAuth, unverified connector availability.
+4. **Warnings** — hashed columns, private networking, browser-only OAuth,
+   connectors not yet GA, and database tables Fivetran confirms have no
+   primary key. Present Beta / Public Preview notes as something to confirm
+   in the target workspace, never as a finding that the connector is off:
+   the planner cannot see the workspace.
 5. **Cost comparison** — Fivetran MAR spend vs modelled Lakeflow Connect
    scenarios from `cost.json`, with the assumptions and caveats printed by
    stage 4. If stage 2.5 ran, note which rates are grounded from system
@@ -81,7 +84,7 @@ Present the following to the customer before any bundle is generated:
 
 **Wait here.** The customer may want to:
 - Narrow scope (exclude blocked or high-effort connections)
-- Re-run discovery with `--columns` to resolve unknown primary keys
+- Reuse Unity Catalog connections that already exist (see stage 3)
 - Provide a measured cost from a pilot instead of the modelled estimate
 - Ask questions about specific connectors or source prerequisites
 
@@ -157,19 +160,20 @@ are redacted before anything is written to disk.
 
 ```bash
 export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
-python3 ${SCRIPTS}/fivetran_discover.py --columns -o ${FTLFC_OUT}/inventory.json
+python3 ${SCRIPTS}/fivetran_discover.py -o ${FTLFC_OUT}/inventory.json
 ```
 
-Pass `--columns` whenever the plan will be used to generate pipelines.
-Fivetran's schema response only returns columns somebody explicitly
-overrode, so without it primary keys are unknown for every untouched table and
-stage 3 cannot set SCD behaviour safely. It costs one rate-limited request per
-table, so for a first look at a large estate run without it, then re-run with
-it once the scope is agreed.
+`--columns` is optional and not needed for planning. It fetches every
+column per table (one rate-limited request each) and only adds primary keys
+for tables nobody customised. Managed connectors, SaaS and database alike,
+read primary keys from the source themselves, so do not re-run discovery or
+pull column metadata to "resolve" keys. Excluded and hashed columns already
+come back without it.
 
 **Fivetran MCP path:** use `fivetran_list_groups`, `fivetran_list_connections_in_group`,
-`fivetran_get_connection_schema_config`, and `fivetran_get_connection_column_config`
-then assemble `inventory.json`, or run `fivetran_discover.py` after exporting
+and `fivetran_get_connection_schema_config`, then assemble `inventory.json`
+(`fivetran_get_connection_column_config` is the `--columns` equivalent, and
+likewise not needed), or run `fivetran_discover.py` after exporting
 API credentials.
 
 ## Stage 2: Measure (Assessment)
@@ -313,6 +317,25 @@ offers both browser OAuth and a non-interactive path, the plan's
 Present browser OAuth as the fallback only if the customer declines the
 source-side setup.
 
+**Reusing existing connections.** Before running this stage, ask whether any
+Unity Catalog connection already exists for a source being migrated. If one
+does, pass it rather than hand-editing names in the generated bundle:
+
+```bash
+python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json -c <dest_catalog> \
+  --use-connection pagerduty=<existing_uc_connection> \
+  --databricks-profile <profile> -o ${FTLFC_OUT}/plan.json
+```
+
+`KEY` is a Fivetran service (applies to every connection of that service) or a
+Fivetran connection id (wins over the service). The plan uses that name, marks
+it `connection_source: existing`, and the bundle never creates or modifies it.
+With `--databricks-profile`, the planner confirms (read-only, via
+`databricks connections get`) that the connection exists and has the right
+type; a missing or mismatched one becomes a blocker, and a confirmed one
+removes the Beta / Public Preview note, since the connector is evidently
+usable there. Without a profile the note stays, softened.
+
 Read the blockers and warnings before continuing. Common ones and what they
 mean:
 
@@ -320,7 +343,16 @@ mean:
   one-time interactive sign-in in Catalog Explorer, but the pipeline and job
   are generated and reference the connection by name. Plan for one human,
   once, per source, before `databricks bundle deploy`.
-- **Unknown primary keys.** Re-run stage 1 with `--columns`.
+- **Primary keys.** Managed connectors read keys from the source themselves,
+  so the plan does not warn about keys Fivetran did not report, and there is
+  no need to re-run discovery or fetch column metadata for them. The one note
+  you may see is for a database source where Fivetran confirms some tables
+  have no key: those need the connector's keyless-table setup (for SQL
+  Server, CDC instead of change tracking).
+- **Beta / Public Preview.** The catalog labels release state; it does not
+  check the workspace. Beta connectors are turned on from the workspace
+  Previews page, some Public Preview ones through the account team. Ask the
+  customer to confirm rather than asserting it is disabled.
 - **Hashed columns.** Fivetran hashes at ingest; Lakeflow Connect has no
   equivalent. Reproduce with a downstream masking policy, and tell the customer
   the raw value will land in the bronze table.
@@ -423,7 +455,7 @@ After preflight exports `${SCRIPTS}` and `${FTLFC_OUT}`:
 
 ```bash
 export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
-python3 ${SCRIPTS}/fivetran_discover.py --columns -g <group_id> \
+python3 ${SCRIPTS}/fivetran_discover.py -g <group_id> \
   -o ${FTLFC_OUT}/inventory.json
 python3 ${SCRIPTS}/fivetran_mar.py --warehouse-id <id> --profile <profile> \
   -o ${FTLFC_OUT}/mar.json

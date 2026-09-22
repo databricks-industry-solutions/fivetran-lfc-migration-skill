@@ -73,7 +73,7 @@ When the Fivetran MCP is configured (e.g. via Cursor `user-fivetran`), Stage 1 d
 
 - `fivetran_list_groups` / `fivetran_list_connections_in_group`
 - `fivetran_get_connection` / `fivetran_get_connection_schema_config`
-- `fivetran_get_connection_column_config` (per table, when `--columns` equivalent is needed)
+- `fivetran_get_connection_column_config` (per table; the `--columns` equivalent, not needed for planning since managed connectors read keys from the source)
 
 Build `inventory.json` from MCP responses using the schema in `references/fivetran-api.md`, or run `fivetran_discover.py` after exporting API credentials.
 

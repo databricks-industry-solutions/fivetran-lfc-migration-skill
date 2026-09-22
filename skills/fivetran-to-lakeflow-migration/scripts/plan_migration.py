@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ftlfc.mapping import build_plan
+from ftlfc.workspace import WorkspaceError, cli_connection_lookup
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,9 +33,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also plan connections that are paused in Fivetran",
     )
+    parser.add_argument(
+        "--use-connection",
+        action="append",
+        default=[],
+        metavar="KEY=NAME",
+        help=(
+            "reuse an existing UC connection instead of generating one. KEY is a Fivetran "
+            "connection id or service (e.g. pagerduty); repeatable"
+        ),
+    )
+    parser.add_argument(
+        "--databricks-profile",
+        help="CLI profile of the target workspace, to confirm reused connections exist",
+    )
     parser.add_argument("-o", "--output", default="out/plan.json")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
+
+    try:
+        existing = _parse_use_connection(args.use_connection)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -56,12 +76,23 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         mar = json.loads(args.mar.read_text()).get("mar")
 
-    plan = build_plan(
-        inventory,
-        target_catalog=args.catalog,
-        mar=mar,
-        include_paused=args.include_paused,
+    lookup = (
+        cli_connection_lookup(args.databricks_profile)
+        if args.databricks_profile and existing
+        else None
     )
+    try:
+        plan = build_plan(
+            inventory,
+            target_catalog=args.catalog,
+            mar=mar,
+            include_paused=args.include_paused,
+            existing_connections=existing,
+            lookup_connection=lookup,
+        )
+    except (ValueError, WorkspaceError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +100,16 @@ def main(argv: list[str] | None = None) -> int:
 
     _report(plan, destination)
     return 0
+
+
+def _parse_use_connection(values: list[str]) -> dict[str, str]:
+    existing: dict[str, str] = {}
+    for value in values:
+        key, sep, name = value.partition("=")
+        if not sep or not key.strip() or not name.strip():
+            raise ValueError(f"--use-connection expects KEY=NAME, got '{value}'")
+        existing[key.strip()] = name.strip()
+    return existing
 
 
 _EFFORT_LABEL = {
@@ -84,11 +125,14 @@ def _report(plan: dict, destination: Path) -> None:
     print(f"Wrote {destination}")
     print(
         f"  {summary['connections_migratable']} of {summary['connections_total']} connections "
-        "have a managed Lakeflow Connect connector and will be generated in the bundle"
+        "will be generated in the bundle (the rest have blockers, listed below)"
     )
     manual = summary.get("connections_manual_sign_in", 0)
     if manual:
         print(f"  {manual} of those need a one-time browser sign-in to create the connection")
+    reused = summary.get("connections_reused", 0)
+    if reused:
+        print(f"  {reused} reuse an existing UC connection")
     print(f"  {summary['tables_total']} tables ({summary['tables_scd2']} needing SCD type 2)")
     print(
         f"  {summary['jobs_required']} jobs and {summary['gateways_required']} gateways to create "
