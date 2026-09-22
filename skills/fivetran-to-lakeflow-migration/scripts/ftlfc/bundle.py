@@ -321,6 +321,11 @@ def _connection_script(plan: dict[str, Any]) -> str:
             lines.append("")
             continue
 
+        if target.get("connection_source") == "existing":
+            lines.append(f"# EXISTING. Reusing '{name}'; this script does not create or modify it.")
+            lines.append("")
+            continue
+
         if target["scriptable"] == "no":
             lines.append(f"# {_MANUAL_CONNECTION_NOTE}")
             lines.append(f"#   Connection name: {name}")
@@ -442,7 +447,8 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
     summary = plan["summary"]
     migratable = [i for i in plan["items"] if not i["blockers"]]
     blocked = [i for i in plan["items"] if i["blockers"]]
-    manual = [i for i in migratable if i["target"]["scriptable"] == "no"]
+    reused = [i for i in migratable if i["target"].get("connection_source") == "existing"]
+    manual = [i for i in migratable if i["target"]["scriptable"] == "no" and i not in reused]
 
     lines = [
         f"# {bundle_name}",
@@ -510,6 +516,27 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
             seen.add(name)
             lines.append(
                 f"| `{name}` | {item['target']['connection_type']} | "
+                f"`{item['fivetran']['connection_id']}` |"
+            )
+
+    if reused:
+        lines += [
+            "",
+            "## Existing connections",
+            "",
+            (
+                "These pipelines reuse a Unity Catalog connection that already exists. Nothing "
+                "here creates or modifies it."
+            ),
+            "",
+            "| Connection name | Type | Confirmed in workspace | Fivetran connection |",
+            "|---|---|---|---|",
+        ]
+        for item in reused:
+            target = item["target"]
+            confirmed = "yes" if target.get("connection_verified") else "not checked"
+            lines.append(
+                f"| `{target['connection_name']}` | {target['connection_type']} | {confirmed} | "
                 f"`{item['fivetran']['connection_id']}` |"
             )
 

@@ -209,72 +209,50 @@ class TestBuildPlan:
         )
         assert any("hashes" in w for w in plan["items"][0]["warnings"])
 
-    def test_unknown_primary_keys_warn_and_do_not_force_append_only(self) -> None:
+    @pytest.mark.parametrize("known", [False, True])
+    def test_managed_saas_connector_never_raises_primary_key_warnings(self, known: bool) -> None:
+        """PagerDuty defines its own keys; unknown or empty Fivetran keys are not a gap,
+        so the plan must not send the agent back to re-run discovery with --columns."""
+        tables = [
+            _table(
+                source_schema="pagerduty",
+                source_table=t,
+                primary_keys=[],
+                primary_keys_known=known,
+            )
+            for t in ("incidents", "services", "teams")
+        ]
+        plan = build_plan(_inventory(_connection(service="pagerduty", objects=tables)), "main_prod")
+        item = plan["items"][0]
+        assert len(item["objects"]) == 3
+        assert all(o["table_configuration"]["scd_type"] == "SCD_TYPE_1" for o in item["objects"])
+        assert all("primary_keys" not in o["table_configuration"] for o in item["objects"])
+        assert not [w for w in item["warnings"] if "primary key" in w.lower()]
+        assert not [w for w in item["warnings"] if "--columns" in w]
+
+    def test_unknown_database_primary_keys_are_not_a_warning(self) -> None:
         plan = build_plan(
             _inventory(_connection(objects=[_table(primary_keys=[], primary_keys_known=False)])),
             "main_prod",
         )
         item = plan["items"][0]
-        # Unknown must not be treated as "no primary key".
         assert item["objects"][0]["table_configuration"]["scd_type"] == "SCD_TYPE_1"
-        assert any("unknown primary keys" in w.lower() for w in item["warnings"])
+        assert not [w for w in item["warnings"] if "primary key" in w.lower()]
 
-    def test_confirmed_absence_of_a_primary_key_becomes_append_only(self) -> None:
-        # For non-managed connectors, confirmed no-PK should still be APPEND_ONLY.
-        build_plan(
-            _inventory(
-                _connection(
-                    service="s3",
-                    objects=[_table(primary_keys=[], primary_keys_known=True)],
-                )
-            ),
-            "main_prod",
-        )
-        # s3 is blocked (no managed connector), so it has no objects in the plan.
-        # Use a managed SaaS connector that would hit the new path instead.
-        # Actually, non-managed connectors return no objects, so test against
-        # a managed connector where the source genuinely has no PK — the fix
-        # trusts managed connectors to detect their own PKs.
-        pass
-
-    def test_managed_connector_keeps_scd1_when_fivetran_reports_no_pk(self) -> None:
-        """Managed connectors detect PKs from the source directly. When
-        Fivetran's column metadata says 'no PK' but a managed connector
-        exists, trust the connector rather than forcing APPEND_ONLY."""
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[
-                        _table(
-                            source_table="incidents",
-                            primary_keys=[],
-                            primary_keys_known=True,
-                        )
-                    ],
-                )
-            ),
-            "main_prod",
-        )
+    def test_confirmed_keyless_database_tables_get_one_setup_note(self) -> None:
+        tables = [
+            _table(source_table=t, primary_keys=[], primary_keys_known=True)
+            for t in ("audit_log", "events")
+        ] + [_table(source_table="Customers")]
+        plan = build_plan(_inventory(_connection(objects=tables)), "main_prod")
         item = plan["items"][0]
-        config = item["objects"][0]["table_configuration"]
-        assert config["scd_type"] == "SCD_TYPE_1"
-        assert "primary_keys" not in config
-        assert any("managed Lakeflow Connect connector" in w for w in item["warnings"])
-
-    def test_managed_database_connector_keeps_scd1_when_fivetran_reports_no_pk(self) -> None:
-        """Same behavior for managed database CDC connectors like SQL Server."""
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="sql_server",
-                    objects=[_table(primary_keys=[], primary_keys_known=True)],
-                )
-            ),
-            "main_prod",
-        )
-        config = plan["items"][0]["objects"][0]["table_configuration"]
-        assert config["scd_type"] == "SCD_TYPE_1"
+        notes = [w for w in item["warnings"] if "primary key" in w.lower()]
+        assert len(notes) == 1
+        assert "2 table(s)" in notes[0] and "dbo.audit_log" in notes[0]
+        assert "CDC instead of change tracking" in notes[0]
+        by_table = {o["source_table"]: o["table_configuration"] for o in item["objects"]}
+        assert by_table["Customers"]["primary_keys"] == ["Id"]
+        assert by_table["audit_log"]["scd_type"] == "SCD_TYPE_1"
 
     def test_disabled_tables_are_skipped(self) -> None:
         plan = build_plan(
@@ -551,3 +529,123 @@ class TestCatalogSupportedTables:
                     f"{service} ({target.connection_type}) has no docs_url, notes, "
                     "auth_note, or source_prerequisites"
                 )
+
+
+def _pagerduty(connection_id: str = "pd1") -> dict:
+    return _connection(
+        id=connection_id,
+        service="pagerduty",
+        objects=[_table(source_schema="pagerduty", source_table="incidents")],
+    )
+
+
+def _availability_warnings(item: dict) -> list[str]:
+    return [w for w in item["warnings"] if "Beta" in w or "Public Preview" in w]
+
+
+class TestAvailabilityWording:
+    def test_beta_points_at_the_workspace_previews_page_not_the_account_team(self) -> None:
+        item = build_plan(_inventory(_pagerduty()), "main")["items"][0]
+        (warning,) = _availability_warnings(item)
+        assert "Previews page" in warning
+        assert "account team" not in warning
+        assert "confirm" in warning
+
+    def test_public_preview_keeps_the_account_team_note(self) -> None:
+        item = build_plan(_inventory(_connection(service="postgres", objects=[_table()])), "main")[
+            "items"
+        ][0]
+        (warning,) = _availability_warnings(item)
+        assert "account team" in warning
+
+
+class TestConnectionReuse:
+    def test_reused_connection_name_replaces_the_generated_one(self) -> None:
+        plan = build_plan(
+            _inventory(_pagerduty()), "main", existing_connections={"pagerduty": "pd_prod"}
+        )
+        target = plan["items"][0]["target"]
+        assert target["connection_name"] == "pd_prod"
+        assert target["connection_source"] == "existing"
+        assert target["connection_verified"] is False
+        assert plan["summary"]["connections_reused"] == 1
+
+    def test_connection_id_takes_precedence_over_service(self) -> None:
+        plan = build_plan(
+            _inventory(_pagerduty("pd1"), _pagerduty("pd2")),
+            "main",
+            existing_connections={"pagerduty": "pd_shared", "pd2": "pd_other"},
+        )
+        names = [i["target"]["connection_name"] for i in plan["items"]]
+        assert names == ["pd_shared", "pd_other"]
+
+    def test_unverified_reuse_softens_but_keeps_the_beta_note(self) -> None:
+        item = build_plan(
+            _inventory(_pagerduty()), "main", existing_connections={"pagerduty": "pd_prod"}
+        )["items"][0]
+        (warning,) = _availability_warnings(item)
+        assert "pd_prod" in warning and "--databricks-profile" in warning
+
+    def test_verified_reuse_drops_the_beta_note(self) -> None:
+        item = build_plan(
+            _inventory(_pagerduty()),
+            "main",
+            existing_connections={"pagerduty": "pd_prod"},
+            lookup_connection=lambda name: {"name": name, "connection_type": "PAGERDUTY"},
+        )["items"][0]
+        assert item["target"]["connection_verified"] is True
+        assert _availability_warnings(item) == []
+        assert item["blockers"] == []
+
+    def test_missing_connection_is_a_blocker(self) -> None:
+        item = build_plan(
+            _inventory(_pagerduty()),
+            "main",
+            existing_connections={"pagerduty": "pd_typo"},
+            lookup_connection=lambda name: None,
+        )["items"][0]
+        assert any("does not exist" in b for b in item["blockers"])
+        # The check already ran, so the note must not ask for it again.
+        (warning,) = _availability_warnings(item)
+        assert "--databricks-profile" not in warning
+
+    def test_wrong_connection_type_is_a_blocker(self) -> None:
+        item = build_plan(
+            _inventory(_pagerduty()),
+            "main",
+            existing_connections={"pagerduty": "sf_prod"},
+            lookup_connection=lambda name: {"name": name, "connection_type": "SALESFORCE"},
+        )["items"][0]
+        assert any("is type SALESFORCE" in b for b in item["blockers"])
+
+    def test_unmatched_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="pagerdooty"):
+            build_plan(_inventory(_pagerduty()), "main", existing_connections={"pagerdooty": "pd"})
+
+    def test_reused_browser_oauth_connection_is_not_high_effort_or_manual(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="hubspot", objects=[_table()])),
+            "main",
+            existing_connections={"hubspot": "hubspot_prod"},
+        )
+        item = plan["items"][0]
+        assert item["target"]["effort"] == "low"
+        assert not [w for w in item["warnings"] if "browser-based OAuth" in w]
+        assert plan["summary"]["connections_manual_sign_in"] == 0
+
+    def test_reused_saas_connection_drops_credential_setup_effort_and_warnings(self) -> None:
+        item = build_plan(
+            _inventory(_connection(service="salesforce", objects=[_table()])),
+            "main",
+            existing_connections={"salesforce": "sf_prod"},
+        )["items"][0]
+        assert item["target"]["effort"] == "low"
+        assert not [w for w in item["warnings"] if "Conditionally scriptable" in w]
+
+    def test_reused_database_connection_keeps_source_setup(self) -> None:
+        item = build_plan(
+            _inventory(_connection(service="postgres", objects=[_table()])),
+            "main",
+            existing_connections={"postgres": "pg_prod"},
+        )["items"][0]
+        assert item["target"]["effort"] == lookup("postgres").effort.value

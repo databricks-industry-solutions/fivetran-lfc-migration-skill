@@ -242,7 +242,7 @@ export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
 S=skills/fivetran-to-lakeflow-migration/scripts
 
 # Stage 1: Discover the Fivetran estate (read-only)
-python3 $S/fivetran_discover.py --columns -o out/inventory.json
+python3 $S/fivetran_discover.py -o out/inventory.json
 
 # Stage 2: Collect MAR billing data
 python3 $S/fivetran_mar.py --warehouse-id <id> --profile <profile> \
@@ -285,7 +285,8 @@ Run `--help` on any script for the full set of options.
 ### Stage 1: Discover
 
 Calls the Fivetran REST API to inventory all connections, schemas, and tables.
-Pass `--columns` to resolve primary keys (one request per table, rate-limited).
+`--columns` (one request per table, rate-limited) is optional: managed
+connectors read primary keys from the source, so planning does not need it.
 
 ### Stage 2: Measure
 
@@ -330,7 +331,8 @@ parallel-run validation before pausing Fivetran.
 
 The agent presents: estate summary, effort breakdown, blockers, warnings, cost
 comparison with assumptions, and a migration recommendation. The customer may
-narrow scope, re-run with `--columns`, or provide measured pilot data.
+narrow scope, name existing UC connections to reuse (`--use-connection`), or
+provide measured pilot data.
 
 ### Gate 2 — Conversion Review (after stage 5)
 

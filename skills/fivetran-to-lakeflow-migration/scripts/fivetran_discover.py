@@ -44,9 +44,9 @@ def main(argv: list[str] | None = None) -> int:
         "--columns",
         action="store_true",
         help=(
-            "resolve the true column list per table. Fivetran's schema response only "
-            "returns overridden columns, so without this primary keys are unknown for "
-            "any table nobody customised. Costs one rate-limited request per table."
+            "optional: resolve the full column list per table, which adds primary keys "
+            "for tables nobody customised. Not needed to plan managed connectors, which "
+            "read keys from the source themselves. Costs one rate-limited request per table."
         ),
     )
     parser.add_argument(
@@ -78,11 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(inventory, indent=2) + "\n")
 
-    _report(inventory, destination, resolved_columns=args.columns)
+    _report(inventory, destination)
     return 0
 
 
-def _report(inventory: dict, destination: Path, resolved_columns: bool) -> None:
+def _report(inventory: dict, destination: Path) -> None:
     summary = inventory["summary"]
     account = inventory["account"]
 
@@ -104,15 +104,6 @@ def _report(inventory: dict, destination: Path, resolved_columns: bool) -> None:
         print(
             f"  {summary['non_direct_networking']} connections use private networking "
             "(PrivateLink/SSH/proxy) and need network design work"
-        )
-
-    unknown = summary["tables_primary_keys_unknown"]
-    if unknown and not resolved_columns:
-        print(
-            f"  note: primary keys unknown for {unknown} tables. Fivetran only reports "
-            "columns that were explicitly overridden. Re-run with --columns to resolve "
-            "them before generating pipelines.",
-            file=sys.stderr,
         )
 
     for warning in inventory["warnings"]:
