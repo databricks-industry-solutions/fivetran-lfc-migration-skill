@@ -6,8 +6,9 @@ pile of one-shot API calls nobody can audit afterwards.
 Three structural facts from the API research shape what gets generated:
 
 - **There is no ``resources.connections``.** Unity Catalog connections cannot be
-  expressed in a bundle at all, so they are emitted as a separate pre-deploy
-  script and referenced by name.
+  expressed in a bundle at all, so pipelines reference them by name and a
+  separate connections bundle (see ``connections.py``) creates them from a
+  secret scope.
 - **There is no supported pipeline-level schedule.** Both ``trigger.cron`` and
   pipeline ``continuous`` are deprecated in favour of wrapping the pipeline in a
   Lakeflow Job, so every ingestion pipeline gets a companion job.
@@ -18,33 +19,22 @@ Three structural facts from the API research shape what gets generated:
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
-import yaml
+from .connections import (
+    BOOTSTRAP_JOB_KEY,
+    CONNECTIONS_DIR,
+    build_connections_bundle,
+    required_secrets,
+    scriptable_connections,
+    secret_scope_name,
+)
+from .yaml_out import dump_yaml
 
 # The gateway's workers do not affect throughput; the driver does. Databricks
 # recommends the smallest practical workers with a large driver.
 GATEWAY_DRIVER_NODE = "r5n.16xlarge"
 GATEWAY_WORKER_NODE = "m5n.large"
-
-_MANUAL_CONNECTION_NOTE = (
-    "MANUAL. This connector uses browser-based OAuth only, so no script can create its "
-    "connection. Create it once in Catalog Explorer (Catalog > External data > "
-    "Connections > Create connection) with exactly the name and type below, then deploy "
-    "the bundle; its pipeline references the connection by name."
-)
-
-
-class _Dumper(yaml.SafeDumper):
-    """Keeps nested bundle YAML readable by indenting sequences under their key."""
-
-    def increase_indent(self, flow: bool = False, indentless: bool = False):
-        return super().increase_indent(flow, False)
-
-
-def dump_yaml(document: dict[str, Any]) -> str:
-    return yaml.dump(document, Dumper=_Dumper, sort_keys=False, width=100, allow_unicode=True)
 
 
 def build_bundle(
@@ -70,7 +60,7 @@ def build_bundle(
         files[f"resources/{key}.pipeline.yml"] = dump_yaml(_pipeline(item, notification_email))
         files[f"resources/{key}.job.yml"] = dump_yaml(_job(item, notification_email))
 
-    files["scripts/create_connections.sh"] = _connection_script(plan)
+    files.update(build_connections_bundle(plan, bundle_name, host))
     files["README.md"] = _bundle_readme(plan, bundle_name)
     return files
 
@@ -90,6 +80,8 @@ def _root(plan: dict[str, Any], bundle_name: str, host: str | None) -> dict[str,
     return {
         "bundle": {"name": bundle_name},
         "include": ["resources/*.yml"],
+        # The connections bundle is deployed on its own, first.
+        "sync": {"exclude": [f"{CONNECTIONS_DIR}/**"]},
         "variables": {
             "dest_catalog": {
                 "description": "Unity Catalog catalog receiving ingested data",
@@ -278,171 +270,12 @@ def _job(item: dict[str, Any], notification_email: str | None) -> dict[str, Any]
     return {"resources": {"jobs": {f"{key}_schedule": job}}}
 
 
-def _connection_script(plan: dict[str, Any]) -> str:
-    """Emit UC connections as a pre-deploy script.
-
-    Bundles have no resources.connections type, and SQL CREATE CONNECTION does
-    not support Lakeflow Connect managed ingestion types, so this uses the CLI.
-    """
-    lines = [
-        "#!/usr/bin/env bash",
-        "# Create the Unity Catalog connections this bundle references.",
-        "#",
-        "# Bundles cannot express UC connections, and SQL CREATE CONNECTION does not",
-        "# support Lakeflow Connect managed ingestion types. The Connections REST API,",
-        "# via the CLI below, is the supported path.",
-        "#",
-        "# Run this BEFORE `databricks bundle deploy`. Fill in every REPLACE_ME first.",
-        "# Secret option key names are not published; if a create call is rejected, the",
-        "# INVALID_PARAMETER_VALUE error names the keys it actually wants.",
-        "",
-        "set -euo pipefail",
-        "",
-        'PROFILE="${1:-DEFAULT}"',
-        "",
-    ]
-
-    seen: set[str] = set()
-    for item in plan["items"]:
-        target = item["target"]
-        name = target["connection_name"]
-        if name in seen or not target["connection_type"]:
-            continue
-        seen.add(name)
-
-        lines.append(
-            f"# -- {item['fivetran']['service']} -> {target['connection_type']} " + "-" * 20
-        )
-
-        if item["blockers"]:
-            lines.append("# SKIPPED. Not included in this bundle:")
-            for blocker in item["blockers"]:
-                lines.append(f"#   {blocker}")
-            lines.append("")
-            continue
-
-        if target["scriptable"] == "no":
-            lines.append(f"# {_MANUAL_CONNECTION_NOTE}")
-            lines.append(f"#   Connection name: {name}")
-            lines.append(f"#   Connection type: {target['connection_type']}")
-            lines.append("")
-            continue
-
-        preferred_auth = target.get("preferred_auth")
-        if target["scriptable"] == "conditional":
-            lines.append("# Conditionally scriptable. " + item["prerequisites"]["auth_note"])
-        if preferred_auth:
-            lines.append(f"# Generated for the {preferred_auth} auth path.")
-        if (target["connection_type"], preferred_auth) in _UNVERIFIED_SECRET_KEYS:
-            lines.append(
-                "# The secret option key names below are inferred from UI labels and are "
-                "not published; verify them before running."
-            )
-
-        payload = {
-            "name": name,
-            "connection_type": target["connection_type"],
-            "read_only": True,
-            "options": _connection_options(target["connection_type"], preferred_auth),
-        }
-        body = json.dumps(payload, indent=2)
-        lines.append(f"echo 'Creating connection {name}...'")
-        lines.append(f"databricks connections create --profile \"$PROFILE\" --json '{body}'")
-        lines.append("")
-
-    return "\n".join(lines) + "\n"
-
-
-# Non-secret option keys observed on real connections of each type. Secret keys
-# are redacted by the API and could not be observed, so they are marked for the
-# operator to supply rather than guessed at.
-_OPTION_HINTS: dict[str, dict[str, str]] = {
-    "SQLSERVER": {
-        "host": "REPLACE_ME",
-        "port": "1433",
-        "user": "REPLACE_ME",
-        "password": "REPLACE_ME",
-    },
-    "POSTGRESQL": {
-        "host": "REPLACE_ME",
-        "port": "5432",
-        "user": "REPLACE_ME",
-        "password": "REPLACE_ME",
-    },
-    "MYSQL": {"host": "REPLACE_ME", "port": "3306", "user": "REPLACE_ME", "password": "REPLACE_ME"},
-    "ORACLE": {
-        "host": "REPLACE_ME",
-        "port": "1521",
-        "service_name": "REPLACE_ME",
-        "user": "REPLACE_ME",
-        "password": "REPLACE_ME",
-    },
-    "TERADATA": {
-        "host": "REPLACE_ME",
-        "port": "1025",
-        "user": "REPLACE_ME",
-        "password": "REPLACE_ME",
-    },
-    "SALESFORCE": {
-        "instance_url": "REPLACE_ME",
-        "is_sandbox": "false",
-        "client_id": "REPLACE_ME",
-        "client_secret": "REPLACE_ME",
-    },
-    "SERVICENOW": {
-        "instance_url": "REPLACE_ME",
-        "client_id": "REPLACE_ME",
-        "client_secret": "REPLACE_ME",
-        "oauth_scope": "useraccount",
-        "user": "REPLACE_ME",
-        "password": "REPLACE_ME",
-    },
-    "WORKDAY_HCM": {
-        "instance_url": "REPLACE_ME",
-        "tenant_name": "REPLACE_ME",
-        "user": "REPLACE_ME",
-        "password": "REPLACE_ME",
-    },
-    "WORKDAY_RAAS": {"user": "REPLACE_ME", "password": "REPLACE_ME"},
-    "NETSUITE": {
-        "host": "REPLACE_ME",
-        "port": "1708",
-        "account_id": "REPLACE_ME",
-        "role_id": "REPLACE_ME",
-        "data_source": "NetSuite2.com",
-    },
-}
-
-
-# Option shapes for a specific auth path, keyed by (connection type, credential
-# type). Used in preference to _OPTION_HINTS when the plan names a preferred auth.
-_AUTH_OPTION_HINTS: dict[tuple[str, str], dict[str, str]] = {
-    ("SALESFORCE", "OAUTH_MTLS"): {
-        "instance_url": "REPLACE_ME",
-        "is_sandbox": "false",
-        "client_id": "REPLACE_ME",
-        "client_secret": "REPLACE_ME",
-        "client_private_key": "REPLACE_ME",
-        "client_certificate": "REPLACE_ME",
-    },
-}
-
-_UNVERIFIED_SECRET_KEYS: frozenset[tuple[str, str]] = frozenset({("SALESFORCE", "OAUTH_MTLS")})
-
-
-def _connection_options(connection_type: str, preferred_auth: str | None = None) -> dict[str, str]:
-    if preferred_auth and (connection_type, preferred_auth) in _AUTH_OPTION_HINTS:
-        return _AUTH_OPTION_HINTS[(connection_type, preferred_auth)]
-    return _OPTION_HINTS.get(
-        connection_type, {"REPLACE_ME": "see references/lakeflow-connect-api.md"}
-    )
-
-
 def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
     summary = plan["summary"]
     migratable = [i for i in plan["items"] if not i["blockers"]]
     blocked = [i for i in plan["items"] if i["blockers"]]
     manual = [i for i in migratable if i["target"]["scriptable"] == "no"]
+    scripted = scriptable_connections(plan)
 
     lines = [
         f"# {bundle_name}",
@@ -455,27 +288,22 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         f"- {summary['gateways_required']} ingestion gateway(s) for CDC database sources",
         f"- {len(migratable)} companion job(s), one per pipeline",
         f"- {summary['tables_total']} table(s) total",
-        "",
-        "## Deploy",
-        "",
-        "```bash",
-        "# 1. Create the Unity Catalog connections. Bundles cannot express them.",
-        "./scripts/create_connections.sh <profile>",
-        "",
-        "# 2. Validate. --strict promotes warnings to errors.",
-        "databricks bundle validate --strict -t dev",
-        "",
-        "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules.",
-        "databricks bundle deploy -t dev",
-        "",
-        "# 4. Check what landed, then promote.",
-        "databricks bundle summary -t dev",
-        "databricks bundle deploy -t prod",
-        "```",
+    ]
+    if scripted:
+        lines.append(
+            f"- `{CONNECTIONS_DIR}/`: a separate bundle that creates {len(scripted)} Unity "
+            "Catalog connection(s) from a secret scope"
+        )
+
+    lines += ["", "## Deploy", "", "```bash", *_deploy_steps(bool(scripted), bool(manual)), "```"]
+
+    if scripted:
+        lines += _connections_section(scripted, bundle_name)
+
+    lines += [
         "",
         "## Before you deploy",
         "",
-        "- Fill in every `REPLACE_ME` in `scripts/create_connections.sh`.",
         (
             "- Gateways run continuously on classic compute and are billed even when the "
             "ingestion pipeline is idle."
@@ -531,3 +359,80 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
             )
 
     return "\n".join(lines) + "\n"
+
+
+def _deploy_steps(has_scripted: bool, has_manual: bool) -> list[str]:
+    steps: list[str] = []
+    if has_scripted:
+        steps += [
+            "# 1. Create the connections that have a non-interactive auth path. Bundles cannot",
+            "#    declare connections, so a separate bundle stores the credentials in a secret",
+            "#    scope and a job creates the connections from them.",
+            f"cd {CONNECTIONS_DIR}",
+            "databricks bundle deploy --profile <profile>",
+            "./scripts/put_secrets.sh <profile>",
+            f"databricks bundle run {BOOTSTRAP_JOB_KEY} --profile <profile>",
+            "cd ..",
+            "",
+        ]
+    if has_manual:
+        steps += [
+            "# Create each browser-OAuth connection listed under 'Manual connections' below,",
+            "# in Catalog Explorer, with exactly the name shown.",
+            "",
+        ]
+    steps += [
+        "# Validate the ingestion bundle. --strict promotes warnings to errors.",
+        "databricks bundle validate --strict -t dev --profile <profile>",
+        "",
+        "# Deploy to dev first. Development mode prefixes names and pauses schedules.",
+        "databricks bundle deploy -t dev --profile <profile>",
+        "",
+        "# Check what landed, then promote.",
+        "databricks bundle summary -t dev --profile <profile>",
+        "databricks bundle deploy -t prod --profile <profile>",
+    ]
+    return steps
+
+
+def _connections_section(scripted: list[dict[str, Any]], bundle_name: str) -> list[str]:
+    scope = secret_scope_name(bundle_name)
+    lines = [
+        "",
+        "## Connections created from the secret scope",
+        "",
+        (
+            f"The connections bundle declares the secret scope `{scope}` and the job "
+            f"`{BOOTSTRAP_JOB_KEY}`. `scripts/put_secrets.sh` prompts for each value below "
+            "(or a file path, for multi-line values), so no credential is written to a file. "
+            "The job then creates each connection, or replaces the options of one that "
+            "already exists, so re-running it after a credential rotation is safe. "
+            "Connections are metastore-level: deploy this once per metastore."
+        ),
+        "",
+        "| Connection name | Type | Auth path | Secrets to store |",
+        "|---|---|---|---|",
+    ]
+    for entry in scripted:
+        keys = ", ".join(f"`{k}`" for k in required_secrets(entry))
+        auth = entry["preferred_auth"] or "default"
+        lines.append(f"| `{entry['name']}` | {entry['connection_type']} | {auth} | {keys} |")
+
+    if any(e["unverified_secret_keys"] for e in scripted):
+        lines += [
+            "",
+            (
+                "Salesforce mTLS option key names are inferred from UI labels. If the job "
+                "reports `INVALID_PARAMETER_VALUE`, the error names the keys it expects."
+            ),
+        ]
+    if any(e["options_json_secret"] for e in scripted):
+        lines += [
+            "",
+            (
+                "Where the only secret is `<connection>.options_json`, the option keys for "
+                "that connector type are not cataloged. Store a JSON object of every option "
+                "(see `references/lakeflow-connect-api.md` in the skill)."
+            ),
+        ]
+    return lines

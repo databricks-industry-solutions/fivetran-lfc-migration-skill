@@ -96,8 +96,9 @@ Present the generated bundle for review before any deployment:
    created, with their target schemas and tables.
 2. **Excluded connections** — anything blocked or out of scope, and why.
 3. **Manual steps required** — which UC connections need browser-based OAuth
-   (listed under "Manual connections" in the bundle README and marked `MANUAL`
-   in `create_connections.sh`), which source systems need admin setup.
+   (listed under "Manual connections" in the bundle README), which source
+   systems need admin setup, and which secrets the customer must store for the
+   rest (listed under "Connections created from the secret scope").
 4. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
    equivalents.
 
@@ -105,7 +106,8 @@ Present the generated bundle for review before any deployment:
 - Adjust destination schemas or table names
 - Change sync frequencies
 - Remove specific tables from scope
-- Review the `create_connections.sh` credential placeholders
+- Review `connections/connections.json`: the connection names, types, auth
+  paths, and which option values come from the secret scope
 
 Do not proceed to stage 6 until the customer explicitly approves the bundle.
 
@@ -381,9 +383,16 @@ pipeline. Managed ingestion pipelines have no supported pipeline-level schedule,
 which is why every pipeline gets a job carrying the cron translated from
 Fivetran's sync frequency.
 
-Unity Catalog connections are *not* bundle resources, because credentials must
-not be committed. They are emitted as `scripts/create_connections.sh` with
-`REPLACE_ME` placeholders, to be run once before deploying.
+Unity Catalog connections are *not* bundle resources, so the output also holds
+a small, separate bundle in `connections/`. It declares a secret scope and a
+serverless job, `bootstrap_connections`, that reads each credential from the
+scope and creates the connection (or replaces the options of an existing one,
+so re-running after a rotation is safe). The customer stores the values with
+`connections/scripts/put_secrets.sh`, which prompts for each one, or reads
+multi-line values such as PEM keys from a file, so no credential is ever
+written to the bundle. Deploy and run it before the ingestion bundle, since the
+pipelines reference the connections by name. Connections that need browser
+OAuth are not in it; nothing can create those without a human.
 
 Review the generated YAML against the plan before deploying. Connections that
 had blockers (no managed connector) are absent from the bundle by design and
@@ -397,8 +406,11 @@ The agent's role ends after deploying the bundle. Everything below is a
 and has no write access to Fivetran.
 
 ```bash
-cd ${FTLFC_OUT}/bundle
-./scripts/create_connections.sh <profile>      # once, per workspace
+cd ${FTLFC_OUT}/bundle/connections                     # once, per metastore
+databricks bundle deploy --profile <profile>
+./scripts/put_secrets.sh <profile>
+databricks bundle run bootstrap_connections --profile <profile>
+cd ..
 databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
 ```

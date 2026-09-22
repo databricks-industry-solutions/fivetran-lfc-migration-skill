@@ -3,8 +3,9 @@
 
     python3 generate_bundle.py -p out/plan.json -o out/bundle --name acme-lfc
 
-Emits reviewable YAML the customer keeps, plus a pre-deploy script for the Unity
-Catalog connections, which bundles cannot express.
+Emits reviewable YAML the customer keeps, plus a separate connections bundle
+(a secret scope and a bootstrap job) that creates the Unity Catalog
+connections, which bundles cannot declare directly.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ftlfc.bundle import build_bundle
+from ftlfc.connections import BOOTSTRAP_JOB_KEY, CONNECTIONS_DIR
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,18 +69,25 @@ def main(argv: list[str] | None = None) -> int:
 
 def _report(plan: dict, output: Path, files: dict) -> None:
     summary = plan["summary"]
-    gateways = sum(1 for f in files if f.endswith("_gateway.pipeline.yml"))
-    pipelines = sum(1 for f in files if f.endswith(".pipeline.yml")) - gateways
+    resources = [f for f in files if f.startswith("resources/")]
+    gateways = sum(1 for f in resources if f.endswith("_gateway.pipeline.yml"))
+    pipelines = sum(1 for f in resources if f.endswith(".pipeline.yml")) - gateways
 
     print(f"Wrote {len(files)} files to {output}")
     print(f"  {pipelines} ingestion pipeline(s) covering {summary['tables_total']} table(s)")
     print(f"  {gateways} ingestion gateway(s)")
-    print(f"  {sum(1 for f in files if f.endswith('.job.yml'))} companion job(s)")
+    print(f"  {sum(1 for f in resources if f.endswith('.job.yml'))} companion job(s)")
     print()
     print("  Next:")
-    print("    1. Fill in the REPLACE_ME values in scripts/create_connections.sh")
-    print(f"    2. cd {output} && ./scripts/create_connections.sh <profile>")
-    step = 3
+    step = 1
+    if f"{CONNECTIONS_DIR}/databricks.yml" in files:
+        print(
+            f"    {step}. cd {output}/{CONNECTIONS_DIR} && databricks bundle deploy "
+            "--profile <profile>"
+        )
+        print(f"    {step + 1}. ./scripts/put_secrets.sh <profile>")
+        print(f"    {step + 2}. databricks bundle run {BOOTSTRAP_JOB_KEY} --profile <profile>")
+        step += 3
     manual = summary.get("connections_manual_sign_in", 0)
     if manual:
         print(
@@ -86,7 +95,7 @@ def _report(plan: dict, output: Path, files: dict) -> None:
             "'Manual connections' in README.md"
         )
         step += 1
-    print(f"    {step}. databricks bundle validate --strict -t dev")
+    print(f"    {step}. cd {output} && databricks bundle validate --strict -t dev")
     print(f"    {step + 1}. databricks bundle deploy -t dev")
 
     blocked = summary["connections_blocked"]

@@ -55,12 +55,12 @@ def dab_schema() -> dict:
     return json.loads(proc.stdout)
 
 
-def _merged_bundle(files: dict[str, str]) -> dict:
+def _merged_bundle(files: dict[str, str], root_dir: str = "") -> dict:
     """Recombine the emitted files the way the CLI would when it loads a bundle."""
-    root = yaml.safe_load(files["databricks.yml"])
+    root = yaml.safe_load(files[f"{root_dir}databricks.yml"])
     resources: dict[str, dict] = {}
     for name, text in files.items():
-        if not name.startswith("resources/"):
+        if not name.startswith(f"{root_dir}resources/"):
             continue
         for kind, entries in (yaml.safe_load(text).get("resources") or {}).items():
             resources.setdefault(kind, {}).update(entries)
@@ -72,10 +72,7 @@ def _plan_from_fixture() -> dict:
     return build_plan(json.loads(FIXTURE.read_text()), target_catalog="main_prod")
 
 
-def test_generated_bundle_matches_dab_schema(dab_schema: dict) -> None:
-    files = build_bundle(_plan_from_fixture(), bundle_name="acme-lfc", host=None)
-    merged = _merged_bundle(files)
-
+def _assert_valid(dab_schema: dict, merged: dict) -> None:
     errors = sorted(
         jsonschema.Draft7Validator(dab_schema).iter_errors(merged),
         key=lambda e: list(e.path),
@@ -83,6 +80,20 @@ def test_generated_bundle_matches_dab_schema(dab_schema: dict) -> None:
     assert not errors, "\n".join(
         "/" + "/".join(map(str, e.path)) + " -> " + e.message for e in errors[:20]
     )
+
+
+def test_generated_bundle_matches_dab_schema(dab_schema: dict) -> None:
+    files = build_bundle(_plan_from_fixture(), bundle_name="acme-lfc", host=None)
+    _assert_valid(dab_schema, _merged_bundle(files))
+
+
+def test_connections_bundle_matches_dab_schema(dab_schema: dict) -> None:
+    files = build_bundle(
+        _plan_from_fixture(), bundle_name="acme-lfc", host="https://example.cloud.databricks.com"
+    )
+    merged = _merged_bundle(files, root_dir="connections/")
+    assert set(merged["resources"]) == {"secret_scopes", "jobs"}
+    _assert_valid(dab_schema, merged)
 
 
 def _enum_containing(schema: dict, member: str) -> set[str]:

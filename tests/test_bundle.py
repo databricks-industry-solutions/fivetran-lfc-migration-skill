@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -232,53 +233,105 @@ class TestJob:
         assert job["email_notifications"]["on_failure"] == ["a@b.com"]
 
 
-class TestConnectionScript:
-    def test_emits_a_create_call_per_connection(self) -> None:
+def _manifest(files: dict) -> list[dict]:
+    return json.loads(files["connections/connections.json"])["connections"]
+
+
+class TestConnectionsBundle:
+    def test_scriptable_connection_gets_a_connections_bundle(self) -> None:
         files = build_bundle(_plan(_item()), "acme")
-        script = files["scripts/create_connections.sh"]
-        assert "databricks connections create" in script
-        assert "conn_sales_abc" in script
+        for path in (
+            "connections/databricks.yml",
+            "connections/resources/credentials.secret_scope.yml",
+            "connections/resources/bootstrap_connections.job.yml",
+            "connections/connections.json",
+            "connections/src/bootstrap_connections.py",
+            "connections/scripts/put_secrets.sh",
+        ):
+            assert path in files, path
 
-    def test_marks_connections_read_only(self) -> None:
-        script = build_bundle(_plan(_item()), "acme")["scripts/create_connections.sh"]
-        assert '"read_only": true' in script
+    def test_no_legacy_script_and_no_placeholders_anywhere(self) -> None:
+        files = build_bundle(_plan(_item()), "acme")
+        assert "scripts/create_connections.sh" not in files
+        assert not any("REPLACE_ME" in contents for contents in files.values())
 
-    def test_blocked_connectors_are_skipped_with_an_explanation(self) -> None:
-        item = _item(connection_type="HUBSPOT", blockers=["no connector"])
-        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
-        assert "SKIPPED" in script
-        assert "no connector" in script
+    def test_secret_scope_is_named_after_the_bundle(self) -> None:
+        files = build_bundle(_plan(_item()), "acme")
+        scope = _load(files, "connections/resources/credentials.secret_scope.yml")
+        assert scope["resources"]["secret_scopes"]["credentials"]["name"] == "acme-credentials"
 
-    def test_browser_oauth_connections_get_a_manual_step_not_a_create_call(self) -> None:
-        item = _item(key="hub", connection_type="HUBSPOT", scriptable="no")
-        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
-        assert "MANUAL" in script
-        assert "Connection name: conn_hub" in script
-        assert "Connection type: HUBSPOT" in script
-        assert "databricks connections create" not in script
+    def test_bootstrap_job_is_serverless_and_reads_the_bundle_scope(self) -> None:
+        files = build_bundle(_plan(_item()), "acme")
+        job = _load(files, "connections/resources/bootstrap_connections.job.yml")["resources"][
+            "jobs"
+        ]["bootstrap_connections"]
+        task = job["tasks"][0]
+        assert "new_cluster" not in task and "existing_cluster_id" not in task
+        assert task["environment_key"] == job["environments"][0]["environment_key"]
+        assert job["environments"][0]["spec"]["environment_version"] == "5"
+        params = task["spark_python_task"]["parameters"]
+        assert params[params.index("--scope") + 1] == "${resources.secret_scopes.credentials.name}"
+        assert task["spark_python_task"]["python_file"] == "../src/bootstrap_connections.py"
 
-    def test_salesforce_mtls_emits_certificate_and_key_options(self) -> None:
+    def test_manifest_splits_fixed_options_from_customer_secrets(self) -> None:
+        entry = _manifest(build_bundle(_plan(_item()), "acme"))[0]
+        assert entry["name"] == "conn_sales_abc"
+        assert entry["options"] == {"is_sandbox": "false"}
+        assert set(entry["from_secrets"]) == {"instance_url", "client_id", "client_secret"}
+        assert entry["options_json_secret"] is False
+
+    def test_salesforce_mtls_asks_for_key_and_certificate_from_files(self) -> None:
         item = _item(scriptable="conditional", preferred_auth="OAUTH_MTLS")
-        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
-        assert '"client_private_key": "REPLACE_ME"' in script
-        assert '"client_certificate": "REPLACE_ME"' in script
-        assert "OAUTH_MTLS auth path" in script
-        assert "verify them before running" in script
+        files = build_bundle(_plan(item), "acme")
+        entry = _manifest(files)[0]
+        assert {"client_private_key", "client_certificate"} <= set(entry["from_secrets"])
+        assert entry["unverified_secret_keys"] is True
+        script = files["connections/scripts/put_secrets.sh"]
+        assert "put_file conn_sales_abc.client_private_key" in script
+        assert "put_file conn_sales_abc.client_certificate" in script
+        assert "put conn_sales_abc.client_id" in script
 
-    def test_unknown_preferred_auth_falls_back_to_default_options(self) -> None:
-        item = _item(connection_type="SERVICENOW", preferred_auth="OAUTH_RESOURCE_OWNER_PASSWORD")
-        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
-        assert '"oauth_scope": "useraccount"' in script
+    def test_uncataloged_connection_type_takes_a_json_options_secret(self) -> None:
+        item = _item(connection_type="PAGERDUTY")
+        files = build_bundle(_plan(item), "acme")
+        entry = _manifest(files)[0]
+        assert entry["options_json_secret"] is True
+        assert entry["from_secrets"] == []
+        assert "put_file conn_sales_abc.options_json" in files["connections/scripts/put_secrets.sh"]
 
-    def test_conditional_connectors_carry_their_auth_caveat(self) -> None:
-        item = _item(scriptable="conditional")
-        item["prerequisites"]["auth_note"] = "Requires mTLS Beta."
-        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
-        assert "Requires mTLS Beta." in script
+    def test_put_secrets_never_takes_values_on_the_command_line(self) -> None:
+        script = build_bundle(_plan(_item()), "acme")["connections/scripts/put_secrets.sh"]
+        assert "--string-value" not in script
+        assert 'SCOPE="${2:-acme-credentials}"' in script
 
-    def test_secret_values_are_placeholders_not_guesses(self) -> None:
-        script = build_bundle(_plan(_item()), "acme")["scripts/create_connections.sh"]
-        assert "REPLACE_ME" in script
+    def test_browser_oauth_connections_are_not_in_the_manifest(self) -> None:
+        plan = _plan(
+            _item(key="sf"),
+            _item(key="hub", connection_type="HUBSPOT", scriptable="no"),
+        )
+        names = [e["name"] for e in _manifest(build_bundle(plan, "acme"))]
+        assert names == ["conn_sf"]
+
+    def test_blocked_connections_are_not_in_the_manifest(self) -> None:
+        plan = _plan(_item(key="sf"), _item(key="s3", blockers=["no connector"]))
+        names = [e["name"] for e in _manifest(build_bundle(plan, "acme"))]
+        assert names == ["conn_sf"]
+
+    def test_no_connections_bundle_when_nothing_is_scriptable(self) -> None:
+        files = build_bundle(_plan(_item(connection_type="HUBSPOT", scriptable="no")), "acme")
+        assert not any(path.startswith("connections/") for path in files)
+        assert "put_secrets" not in files["README.md"]
+
+    def test_ingestion_bundle_does_not_sync_the_connections_bundle(self) -> None:
+        root = _load(build_bundle(_plan(_item()), "acme"), "databricks.yml")
+        assert root["sync"]["exclude"] == ["connections/**"]
+
+    def test_readme_orders_connections_before_the_ingestion_deploy(self) -> None:
+        readme = build_bundle(_plan(_item()), "acme")["README.md"]
+        assert readme.index("bundle run bootstrap_connections") < readme.index(
+            "bundle deploy -t dev"
+        )
+        assert "`conn_sales_abc.client_secret`" in readme
 
 
 class TestBlockedConnections:
