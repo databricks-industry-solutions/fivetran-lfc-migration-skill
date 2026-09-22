@@ -104,6 +104,7 @@ def _plan_connection(
             "availability": target.availability.value,
             "gateway": target.gateway.value,
             "scriptable": target.scriptable.value,
+            "preferred_auth": target.preferred_auth,
             "effort": target.effort.value,
             "pipeline_name": name,
             "destination_catalog": target_catalog,
@@ -326,14 +327,18 @@ def _assess(
         )
         return blockers, warnings
 
+    # A browser sign-in costs one manual step for the connection only; the
+    # pipeline and job are still generated and reference it by name.
     if target.scriptable is Scriptable.NO:
-        blockers.append(
+        warnings.append(
             f"'{service}' uses browser-based OAuth only, so its Unity Catalog connection "
-            "cannot be created programmatically. A human must create it once in the UI; "
-            "pipeline creation is scriptable afterwards."
+            "cannot be created programmatically. A human must create it once in Catalog "
+            "Explorer, using the connection name in the bundle, before deploying; the "
+            "pipeline and job are generated and deploy normally afterwards."
         )
     elif target.scriptable is Scriptable.CONDITIONAL:
-        warnings.append(f"Conditionally scriptable: {target.auth_note}")
+        auth = f" (generated as {target.preferred_auth})" if target.preferred_auth else ""
+        warnings.append(f"Conditionally scriptable{auth}: {target.auth_note}")
 
     if not target.prerequisites_automatable:
         warnings.append(
@@ -412,6 +417,7 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
 
     migratable = [i for i in items if not i["blockers"]]
     needs_gateway = [i for i in items if i["target"]["gateway"] == Gateway.REQUIRED.value]
+    manual_connections = [i for i in migratable if i["target"]["scriptable"] == Scriptable.NO.value]
 
     tables_dropped = sum(
         1
@@ -424,6 +430,7 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
         "connections_total": len(items),
         "connections_migratable": len(migratable),
         "connections_blocked": len(items) - len(migratable),
+        "connections_manual_sign_in": len(manual_connections),
         "tables_total": sum(len(i["objects"]) for i in items),
         "tables_dropped": tables_dropped,
         "tables_scd2": sum(

@@ -28,11 +28,11 @@ import yaml
 GATEWAY_DRIVER_NODE = "r5n.16xlarge"
 GATEWAY_WORKER_NODE = "m5n.large"
 
-# Connection types whose UC connection can never be created without a human
-# completing a browser consent flow.
 _MANUAL_CONNECTION_NOTE = (
-    "This connector uses browser-based OAuth only. Create the connection once in the "
-    "Databricks UI, then this bundle will reference it by name."
+    "MANUAL. This connector uses browser-based OAuth only, so no script can create its "
+    "connection. Create it once in Catalog Explorer (Catalog > External data > "
+    "Connections > Create connection) with exactly the name and type below, then deploy "
+    "the bundle; its pipeline references the connection by name."
 )
 
 
@@ -315,20 +315,35 @@ def _connection_script(plan: dict[str, Any]) -> str:
         )
 
         if item["blockers"]:
-            lines.append(f"# SKIPPED. {_MANUAL_CONNECTION_NOTE}")
+            lines.append("# SKIPPED. Not included in this bundle:")
             for blocker in item["blockers"]:
                 lines.append(f"#   {blocker}")
             lines.append("")
             continue
 
+        if target["scriptable"] == "no":
+            lines.append(f"# {_MANUAL_CONNECTION_NOTE}")
+            lines.append(f"#   Connection name: {name}")
+            lines.append(f"#   Connection type: {target['connection_type']}")
+            lines.append("")
+            continue
+
+        preferred_auth = target.get("preferred_auth")
         if target["scriptable"] == "conditional":
             lines.append("# Conditionally scriptable. " + item["prerequisites"]["auth_note"])
+        if preferred_auth:
+            lines.append(f"# Generated for the {preferred_auth} auth path.")
+        if (target["connection_type"], preferred_auth) in _UNVERIFIED_SECRET_KEYS:
+            lines.append(
+                "# The secret option key names below are inferred from UI labels and are "
+                "not published; verify them before running."
+            )
 
         payload = {
             "name": name,
             "connection_type": target["connection_type"],
             "read_only": True,
-            "options": _connection_options(target["connection_type"]),
+            "options": _connection_options(target["connection_type"], preferred_auth),
         }
         body = json.dumps(payload, indent=2)
         lines.append(f"echo 'Creating connection {name}...'")
@@ -399,7 +414,25 @@ _OPTION_HINTS: dict[str, dict[str, str]] = {
 }
 
 
-def _connection_options(connection_type: str) -> dict[str, str]:
+# Option shapes for a specific auth path, keyed by (connection type, credential
+# type). Used in preference to _OPTION_HINTS when the plan names a preferred auth.
+_AUTH_OPTION_HINTS: dict[tuple[str, str], dict[str, str]] = {
+    ("SALESFORCE", "OAUTH_MTLS"): {
+        "instance_url": "REPLACE_ME",
+        "is_sandbox": "false",
+        "client_id": "REPLACE_ME",
+        "client_secret": "REPLACE_ME",
+        "client_private_key": "REPLACE_ME",
+        "client_certificate": "REPLACE_ME",
+    },
+}
+
+_UNVERIFIED_SECRET_KEYS: frozenset[tuple[str, str]] = frozenset({("SALESFORCE", "OAUTH_MTLS")})
+
+
+def _connection_options(connection_type: str, preferred_auth: str | None = None) -> dict[str, str]:
+    if preferred_auth and (connection_type, preferred_auth) in _AUTH_OPTION_HINTS:
+        return _AUTH_OPTION_HINTS[(connection_type, preferred_auth)]
     return _OPTION_HINTS.get(
         connection_type, {"REPLACE_ME": "see references/lakeflow-connect-api.md"}
     )
@@ -409,6 +442,7 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
     summary = plan["summary"]
     migratable = [i for i in plan["items"] if not i["blockers"]]
     blocked = [i for i in plan["items"] if i["blockers"]]
+    manual = [i for i in migratable if i["target"]["scriptable"] == "no"]
 
     lines = [
         f"# {bundle_name}",
@@ -452,12 +486,42 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         ),
     ]
 
+    if manual:
+        lines += [
+            "",
+            "## Manual connections",
+            "",
+            (
+                "These connectors use browser-based OAuth only. Their pipelines and jobs are in "
+                "this bundle, but each connection must be created once in Catalog Explorer "
+                "(Catalog > External data > Connections > Create connection) with exactly the "
+                "name below, by a user who can sign in to the source. Do this before "
+                "`databricks bundle deploy`."
+            ),
+            "",
+            "| Connection name | Type | Fivetran connection |",
+            "|---|---|---|",
+        ]
+        seen: set[str] = set()
+        for item in manual:
+            name = item["target"]["connection_name"]
+            if name in seen:
+                continue
+            seen.add(name)
+            lines.append(
+                f"| `{name}` | {item['target']['connection_type']} | "
+                f"`{item['fivetran']['connection_id']}` |"
+            )
+
     if blocked:
         lines += [
             "",
             "## Not included",
             "",
-            "These Fivetran connections have no automatable path and are absent from this bundle:",
+            (
+                "These Fivetran connections have no managed Lakeflow Connect connector and are "
+                "absent from this bundle:"
+            ),
             "",
         ]
         for item in blocked:

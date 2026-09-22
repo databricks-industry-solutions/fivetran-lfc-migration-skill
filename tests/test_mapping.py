@@ -10,7 +10,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.catalog import Category, Effort, Gateway, Scriptable, lookup
+from ftlfc.catalog import CATALOG, Category, Effort, Gateway, Scriptable, lookup
 from ftlfc.mapping import CRON_BY_MINUTES, build_plan, to_identifier
 
 
@@ -41,12 +41,41 @@ class TestCatalog:
         assert target.scriptable is Scriptable.CONDITIONAL
         assert "mTLS" in target.auth_note
 
+    @pytest.mark.parametrize("service", ["salesforce", "salesforce_sandbox"])
+    def test_salesforce_prefers_mtls_and_is_medium_effort(self, service: str) -> None:
+        target = lookup(service)
+        assert target.preferred_auth == "OAUTH_MTLS"
+        assert target.effort is Effort.MEDIUM
+
     def test_workday_is_scriptable_but_needs_manual_source_setup(self) -> None:
         target = lookup("workday")
         assert target.scriptable is Scriptable.YES
         assert target.prerequisites_automatable is False
-        # Scriptable connection, un-scriptable source setup: still needs a human.
-        assert target.effort is Effort.HIGH
+        # Source admin work is a prerequisite; the connection itself is scriptable.
+        assert target.effort is Effort.MEDIUM
+
+    @pytest.mark.parametrize(
+        "service,preferred_auth",
+        [
+            ("servicenow", "OAUTH_RESOURCE_OWNER_PASSWORD"),
+            ("google_analytics_4", "USERNAME_PASSWORD"),
+            ("sharepoint", "OAUTH_M2M"),
+        ],
+    )
+    def test_multi_auth_connectors_prefer_a_non_interactive_path(
+        self, service: str, preferred_auth: str
+    ) -> None:
+        target = lookup(service)
+        assert target.preferred_auth == preferred_auth
+        assert target.effort is Effort.MEDIUM
+
+    def test_medium_effort_is_reachable(self) -> None:
+        assert any(t.effort is Effort.MEDIUM for t in CATALOG.values())
+
+    def test_only_browser_oauth_only_connectors_are_high_effort(self) -> None:
+        for service, target in CATALOG.items():
+            if target.effort is Effort.HIGH:
+                assert target.scriptable is Scriptable.NO, service
 
     def test_sources_without_a_connector_are_blocked_with_an_alternative(self) -> None:
         target = lookup("s3")
@@ -264,10 +293,20 @@ class TestBuildPlan:
         plan = build_plan(_inventory(_connection(paused=True)), "main_prod", include_paused=True)
         assert len(plan["items"]) == 1
 
-    def test_browser_oauth_source_is_blocked(self) -> None:
+    def test_browser_oauth_source_is_a_warning_not_a_blocker(self) -> None:
         plan = build_plan(_inventory(_connection(service="hubspot")), "main_prod")
-        assert plan["items"][0]["blockers"]
-        assert plan["summary"]["connections_blocked"] == 1
+        item = plan["items"][0]
+        assert item["blockers"] == []
+        assert any("browser-based OAuth only" in w for w in item["warnings"])
+        assert item["target"]["effort"] == "high"
+        assert plan["summary"]["connections_blocked"] == 0
+        assert plan["summary"]["connections_manual_sign_in"] == 1
+
+    def test_conditional_warning_names_the_generated_auth_path(self) -> None:
+        plan = build_plan(_inventory(_connection(service="salesforce")), "main_prod")
+        item = plan["items"][0]
+        assert item["target"]["preferred_auth"] == "OAUTH_MTLS"
+        assert any("generated as OAUTH_MTLS" in w for w in item["warnings"])
 
     def test_source_without_a_connector_is_blocked_with_guidance(self) -> None:
         plan = build_plan(_inventory(_connection(service="s3")), "main_prod")
@@ -500,7 +539,6 @@ class TestCatalogSupportedTables:
         assert target.supported_tables is None
 
     def test_all_managed_connectors_have_docs_url_or_notes(self) -> None:
-        from ftlfc.catalog import CATALOG
         for service, target in CATALOG.items():
             if target.has_managed_connector:
                 has_context = (

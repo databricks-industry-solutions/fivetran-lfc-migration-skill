@@ -20,6 +20,7 @@ def _item(
     connection_type: str = "SALESFORCE",
     gateway: str = "not_required",
     scriptable: str = "yes",
+    preferred_auth: str | None = None,
     objects=None,
     schedule=None,
     blockers=None,
@@ -33,6 +34,7 @@ def _item(
             "availability": "ga",
             "gateway": gateway,
             "scriptable": scriptable,
+            "preferred_auth": preferred_auth,
             "effort": "low",
             "pipeline_name": key,
             "destination_catalog": "main",
@@ -242,10 +244,31 @@ class TestConnectionScript:
         assert '"read_only": true' in script
 
     def test_blocked_connectors_are_skipped_with_an_explanation(self) -> None:
-        item = _item(connection_type="HUBSPOT", blockers=["browser OAuth only"])
+        item = _item(connection_type="HUBSPOT", blockers=["no connector"])
         script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
         assert "SKIPPED" in script
-        assert "browser OAuth only" in script
+        assert "no connector" in script
+
+    def test_browser_oauth_connections_get_a_manual_step_not_a_create_call(self) -> None:
+        item = _item(key="hub", connection_type="HUBSPOT", scriptable="no")
+        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
+        assert "MANUAL" in script
+        assert "Connection name: conn_hub" in script
+        assert "Connection type: HUBSPOT" in script
+        assert "databricks connections create" not in script
+
+    def test_salesforce_mtls_emits_certificate_and_key_options(self) -> None:
+        item = _item(scriptable="conditional", preferred_auth="OAUTH_MTLS")
+        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
+        assert '"client_private_key": "REPLACE_ME"' in script
+        assert '"client_certificate": "REPLACE_ME"' in script
+        assert "OAUTH_MTLS auth path" in script
+        assert "verify them before running" in script
+
+    def test_unknown_preferred_auth_falls_back_to_default_options(self) -> None:
+        item = _item(connection_type="SERVICENOW", preferred_auth="OAUTH_RESOURCE_OWNER_PASSWORD")
+        script = build_bundle(_plan(item), "acme")["scripts/create_connections.sh"]
+        assert '"oauth_scope": "useraccount"' in script
 
     def test_conditional_connectors_carry_their_auth_caveat(self) -> None:
         item = _item(scriptable="conditional")
@@ -268,11 +291,31 @@ class TestBlockedConnections:
         assert "Not included" in files["README.md"]
         assert "No managed connector for s3." in files["README.md"]
 
+    def test_readme_does_not_list_manual_connections_when_there_are_none(self) -> None:
+        assert "Manual connections" not in build_bundle(_plan(_item()), "acme")["README.md"]
+
     def test_mixed_plan_emits_only_the_migratable_pipelines(self) -> None:
         plan = _plan(_item(key="good"), _item(key="bad", blockers=["nope"]))
         files = build_bundle(plan, "acme")
         assert "resources/good.pipeline.yml" in files
         assert "resources/bad.pipeline.yml" not in files
+
+
+class TestBrowserOAuthConnections:
+    def test_pipeline_and_job_are_generated(self) -> None:
+        item = _item(key="conf", connection_type="CONFLUENCE", scriptable="no")
+        files = build_bundle(_plan(item), "acme")
+        assert "resources/conf.pipeline.yml" in files
+        assert "resources/conf.job.yml" in files
+        pipeline = _load(files, "resources/conf.pipeline.yml")["resources"]["pipelines"]["conf"]
+        assert pipeline["ingestion_definition"]["connection_name"] == "conn_conf"
+
+    def test_readme_lists_the_manual_connection(self) -> None:
+        item = _item(key="conf", connection_type="CONFLUENCE", scriptable="no")
+        readme = build_bundle(_plan(item), "acme")["README.md"]
+        assert "## Manual connections" in readme
+        assert "| `conn_conf` | CONFLUENCE |" in readme
+        assert "Not included" not in readme
 
 
 class TestAutoDiscoverForManagedSaas:

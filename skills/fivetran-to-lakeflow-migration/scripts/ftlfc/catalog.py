@@ -65,8 +65,8 @@ class Effort(str, Enum):
     """Overall migration difficulty, derived rather than hand-assigned."""
 
     LOW = "low"  # fully automatable end to end
-    MEDIUM = "medium"  # automatable, but source-side admin work first
-    HIGH = "high"  # a human must complete a browser or vendor-UI step
+    MEDIUM = "medium"  # connection is scriptable once a source admin supplies credentials
+    HIGH = "high"  # the UC connection needs a one-time interactive browser sign-in
     BLOCKED = "blocked"  # no managed path; needs a different architecture
 
 
@@ -81,6 +81,10 @@ class Target:
     scriptable: Scriptable = Scriptable.YES
     #: Why it is not scriptable, or what the scriptable path requires.
     auth_note: str = ""
+    #: UC ``credential_type`` of the non-interactive auth path to generate by
+    #: default, for connectors that also offer browser OAuth. ``None`` means the
+    #: connector has a single auth mode.
+    preferred_auth: str | None = None
     #: Source-system work that must happen before ingestion can run.
     source_prerequisites: str = ""
     #: Whether those prerequisites can be scripted.
@@ -122,8 +126,11 @@ class Target:
             return Effort.BLOCKED
         if self.scriptable is Scriptable.NO:
             return Effort.HIGH
+        # Source-admin work (certificates, connected apps, API users) is a
+        # prerequisite for the customer, not a reason the connection cannot be
+        # created by automation afterwards.
         if self.scriptable is Scriptable.CONDITIONAL or not self.prerequisites_automatable:
-            return Effort.MEDIUM if self.prerequisites_automatable else Effort.HIGH
+            return Effort.MEDIUM
         return Effort.LOW
 
 
@@ -154,6 +161,13 @@ _SALESFORCE_PREREQ = (
     "An API-enabled Salesforce user with access to every ingested object. The Databricks "
     "connected app must be installed, which needs admin rights unless the user holds "
     "'Approve Uninstalled Connected Apps'. Max 4 connections per authenticating user."
+)
+_SALESFORCE_MTLS = (
+    "Scriptable via mTLS + OAuth client credentials, after a Salesforce admin uploads a "
+    "certificate signed by a Salesforce-trusted public CA (allow lead time) and configures "
+    "a connected app for the client credentials flow. Earlier docs marked mTLS Beta behind "
+    "a workspace preview; the connection page no longer does, so confirm on the workspace "
+    "Previews page. Browser OAuth is the fallback if the customer declines this setup."
 )
 _WORKDAY_RAAS_PREREQ = (
     "All in the Workday UI: create an Integration System User, an unconstrained "
@@ -191,6 +205,7 @@ def _saas(
     availability: Availability = Availability.UNVERIFIED,
     scriptable: Scriptable = Scriptable.YES,
     auth_note: str = "",
+    preferred_auth: str | None = None,
     prereq: str = "",
     prereq_auto: bool = True,
     fixed_source_schema: str | None = None,
@@ -206,6 +221,7 @@ def _saas(
         gateway=Gateway.NOT_REQUIRED,
         scriptable=scriptable,
         auth_note=auth_note,
+        preferred_auth=preferred_auth,
         source_prerequisites=prereq,
         prerequisites_automatable=prereq_auto,
         fixed_source_schema=fixed_source_schema,
@@ -426,12 +442,8 @@ CATALOG: dict[str, Target] = {
         "SALESFORCE",
         availability=Availability.GA,
         scriptable=Scriptable.CONDITIONAL,
-        auth_note=(
-            "Scriptable only via mTLS + OAuth client credentials, which is Beta and gated "
-            "behind a workspace preview flag, and needs a CA-signed certificate and "
-            "connected app configured in Salesforce first. Otherwise a browser step is "
-            "required."
-        ),
+        auth_note=_SALESFORCE_MTLS,
+        preferred_auth="OAUTH_MTLS",
         prereq=_SALESFORCE_PREREQ,
         prereq_auto=False,
         fixed_source_schema="objects",
@@ -450,7 +462,8 @@ CATALOG: dict[str, Target] = {
         "SALESFORCE",
         availability=Availability.GA,
         scriptable=Scriptable.CONDITIONAL,
-        auth_note="Same as Salesforce. Set the is_sandbox option.",
+        auth_note=f"{_SALESFORCE_MTLS} Set the is_sandbox option.",
+        preferred_auth="OAUTH_MTLS",
         prereq=_SALESFORCE_PREREQ,
         prereq_auto=False,
         fixed_source_schema="objects",
@@ -492,6 +505,7 @@ CATALOG: dict[str, Target] = {
             "in a live metastore. The recommended U2M path instead needs an interactive "
             "MFA sign-in and re-authorization roughly every 100 days."
         ),
+        preferred_auth="OAUTH_RESOURCE_OWNER_PASSWORD",
         prereq=_SERVICENOW_PREREQ,
         prereq_auto=False,
         docs_url=(
@@ -520,9 +534,12 @@ CATALOG: dict[str, Target] = {
                 "Scriptable with a GCP service-account JSON key (surfaced in the UI as "
                 "username/password). The default path is browser OAuth."
             ),
+            preferred_auth="USERNAME_PASSWORD",
             prereq=(
-                "Create a GCP service account and key, then grant it access to the GA4 "
-                "property. The grant is a Google Analytics Admin action."
+                "Link the GA4 property to BigQuery export (a Google Analytics Admin action). "
+                "Enable the BigQuery, BigQuery Storage, and Cloud Resource Manager APIs on "
+                "the export project, then create a service account with BigQuery Data "
+                "Viewer, BigQuery Job User, and BigQuery Read Session User, and a JSON key."
             ),
             prereq_auto=False,
         )
@@ -546,6 +563,7 @@ CATALOG: dict[str, Target] = {
         category=Category.FILE,
         scriptable=Scriptable.YES,
         auth_note="Entra ID client credentials (OAUTH_M2M) observed alongside U2M.",
+        preferred_auth="OAUTH_M2M",
         source_prerequisites="Entra ID app registration plus site or folder permissions.",
         prerequisites_automatable=False,
     ),
