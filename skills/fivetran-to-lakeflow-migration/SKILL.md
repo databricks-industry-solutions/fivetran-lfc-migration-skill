@@ -96,7 +96,8 @@ Present the generated bundle for review before any deployment:
    created, with their target schemas and tables.
 2. **Excluded connections** — anything blocked or out of scope, and why.
 3. **Manual steps required** — which UC connections need browser-based OAuth
-   (listed in `create_connections.sh`), which source systems need admin setup.
+   (listed under "Manual connections" in the bundle README and marked `MANUAL`
+   in `create_connections.sh`), which source systems need admin setup.
 4. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
    equivalents.
 
@@ -299,19 +300,26 @@ python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json -c <dest_cat
 The plan classifies every connection by effort, and the distinction that
 matters is not "supported" but *who has to do the work*:
 
-| Effort | Meaning |
-|---|---|
-| `low` | Fully automatable end to end |
-| `medium` | Automatable, after a source-system admin does setup |
-| `high` | A human must complete a browser or vendor-UI step |
-| `blocked` | No managed connector; needs a different architecture |
+| Effort | Meaning | In the bundle? |
+|---|---|---|
+| `low` | Fully automatable end to end | Yes |
+| `medium` | Connection is scriptable once a source-system admin does setup and supplies credentials (Salesforce mTLS, ServiceNow ROPC, Workday, NetSuite, GA4 service account) | Yes |
+| `high` | The UC connection needs a one-time interactive browser sign-in (browser-OAuth-only connectors) | Yes; the connection is a manual checklist step |
+| `blocked` | No managed connector; needs a different architecture | No |
+
+Source-admin work alone never makes a connection `high`. Where a connector
+offers both browser OAuth and a non-interactive path, the plan's
+`preferred_auth` names the non-interactive one and the bundle generates it.
+Present browser OAuth as the fallback only if the customer declines the
+source-side setup.
 
 Read the blockers and warnings before continuing. Common ones and what they
 mean:
 
-- **Browser-only OAuth.** SaaS connection types cannot be created with SQL, and
-  most need a one-time interactive consent in Catalog Explorer. Pipeline
-  creation is scriptable afterwards. Plan for one human, once, per source.
+- **Browser-only OAuth.** A warning, not a blocker. The connection needs a
+  one-time interactive sign-in in Catalog Explorer, but the pipeline and job
+  are generated and reference the connection by name. Plan for one human,
+  once, per source, before `databricks bundle deploy`.
 - **Unknown primary keys.** Re-run stage 1 with `--columns`.
 - **Hashed columns.** Fivetran hashes at ingest; Lakeflow Connect has no
   equivalent. Reproduce with a downstream masking policy, and tell the customer
@@ -378,7 +386,9 @@ not be committed. They are emitted as `scripts/create_connections.sh` with
 `REPLACE_ME` placeholders, to be run once before deploying.
 
 Review the generated YAML against the plan before deploying. Connections that
-had blockers are absent from the bundle by design and listed in its README.
+had blockers (no managed connector) are absent from the bundle by design and
+listed in its README. Browser-OAuth connections are present; create each one
+in Catalog Explorer with the exact name in the README before deploying.
 
 ## Stage 6: Deploy (Data Migration + Reconciliation)
 

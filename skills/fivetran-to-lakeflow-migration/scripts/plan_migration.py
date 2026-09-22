@@ -73,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
 
 _EFFORT_LABEL = {
     "low": "fully automatable",
-    "medium": "automatable after source-side admin work",
-    "high": "needs a human in the source system or a browser",
+    "medium": "automatable after source-side admin work and customer-supplied credentials",
+    "high": "connection needs a one-time browser sign-in; pipeline still generated",
     "blocked": "no managed connector",
 }
 
@@ -84,8 +84,11 @@ def _report(plan: dict, destination: Path) -> None:
     print(f"Wrote {destination}")
     print(
         f"  {summary['connections_migratable']} of {summary['connections_total']} connections "
-        "can be migrated without manual intervention"
+        "have a managed Lakeflow Connect connector and will be generated in the bundle"
     )
+    manual = summary.get("connections_manual_sign_in", 0)
+    if manual:
+        print(f"  {manual} of those need a one-time browser sign-in to create the connection")
     print(f"  {summary['tables_total']} tables ({summary['tables_scd2']} needing SCD type 2)")
     print(
         f"  {summary['jobs_required']} jobs and {summary['gateways_required']} gateways to create "

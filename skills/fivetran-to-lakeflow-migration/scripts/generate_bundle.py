@@ -78,14 +78,22 @@ def _report(plan: dict, output: Path, files: dict) -> None:
     print("  Next:")
     print("    1. Fill in the REPLACE_ME values in scripts/create_connections.sh")
     print(f"    2. cd {output} && ./scripts/create_connections.sh <profile>")
-    print("    3. databricks bundle validate --strict -t dev")
-    print("    4. databricks bundle deploy -t dev")
+    step = 3
+    manual = summary.get("connections_manual_sign_in", 0)
+    if manual:
+        print(
+            f"    {step}. Create the {manual} browser-OAuth connection(s) listed under "
+            "'Manual connections' in README.md"
+        )
+        step += 1
+    print(f"    {step}. databricks bundle validate --strict -t dev")
+    print(f"    {step + 1}. databricks bundle deploy -t dev")
 
     blocked = summary["connections_blocked"]
     if blocked:
         print(
             f"\n  {blocked} connection(s) are absent from the bundle because they have no "
-            f"automatable path. See {output}/README.md.",
+            f"managed Lakeflow Connect connector. See {output}/README.md.",
             file=sys.stderr,
         )
 

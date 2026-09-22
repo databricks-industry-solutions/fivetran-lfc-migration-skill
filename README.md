@@ -335,7 +335,8 @@ narrow scope, re-run with `--columns`, or provide measured pilot data.
 ### Gate 2 — Conversion Review (after stage 5)
 
 The agent presents: bundle contents, excluded connections, manual steps
-(browser OAuth), and schedule mapping. The customer may adjust schemas,
+(browser-OAuth connections listed under "Manual connections" in the bundle
+README), and schedule mapping. The customer may adjust schemas,
 frequencies, or table scope.
 
 Neither gate can be skipped. Do not proceed until the customer explicitly
@@ -476,6 +477,8 @@ Connector tables inside the customer's destination warehouse.
 connector exists, whether its UC connection can be created without a browser,
 and whether the source system's prerequisites can be scripted. These three
 dimensions produce the four effort levels (low / medium / high / blocked).
+Only `blocked` (no managed connector) keeps a connection out of the bundle;
+browser-OAuth-only connectors are `high` and still get a pipeline and job.
 
 **The cost comparison is asymmetric on purpose.** Fivetran spend is measurable.
 Lakeflow Connect spend is not predictable in advance — Databricks publishes no
