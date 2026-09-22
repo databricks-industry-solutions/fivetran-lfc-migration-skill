@@ -618,6 +618,35 @@ class TestConnectionReuse:
         )["items"][0]
         assert any("is type SALESFORCE" in b for b in item["blockers"])
 
+    def test_api_source_connection_matches_on_source_name(self) -> None:
+        # The shape the PagerDuty ingestion wizard actually stores in Unity Catalog.
+        item = build_plan(
+            _inventory(_pagerduty()),
+            "main",
+            existing_connections={"pagerduty": "pd_prod"},
+            lookup_connection=lambda name: {
+                "name": name,
+                "connection_type": "API_SOURCE",
+                "options": {"source_name": "pagerduty", "region": "us"},
+            },
+        )["items"][0]
+        assert item["blockers"] == []
+        assert item["target"]["connection_verified"] is True
+        assert _availability_warnings(item) == []
+
+    def test_api_source_for_another_connector_is_a_blocker(self) -> None:
+        item = build_plan(
+            _inventory(_pagerduty()),
+            "main",
+            existing_connections={"pagerduty": "other"},
+            lookup_connection=lambda name: {
+                "name": name,
+                "connection_type": "API_SOURCE",
+                "options": {"source_name": "jira"},
+            },
+        )["items"][0]
+        assert any("API_SOURCE (source_name=jira)" in b for b in item["blockers"])
+
     def test_unmatched_key_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="pagerdooty"):
             build_plan(_inventory(_pagerduty()), "main", existing_connections={"pagerdooty": "pd"})

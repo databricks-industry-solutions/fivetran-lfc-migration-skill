@@ -76,9 +76,11 @@ def _report(plan: dict, output: Path, files: dict) -> None:
     print(f"  {sum(1 for f in files if f.endswith('.job.yml'))} companion job(s)")
     print()
     print("  Next:")
-    print("    1. Fill in the REPLACE_ME values in scripts/create_connections.sh")
-    print(f"    2. cd {output} && ./scripts/create_connections.sh <profile>")
-    step = 3
+    step = 1
+    if "databricks connections create" in files.get("scripts/create_connections.sh", ""):
+        print("    1. Fill in the REPLACE_ME values in scripts/create_connections.sh")
+        print(f"    2. cd {output} && ./scripts/create_connections.sh <profile>")
+        step = 3
     manual = summary.get("connections_manual_sign_in", 0)
     if manual:
         print(

@@ -127,13 +127,32 @@ class _ReuseContext:
                 f"UC connection '{name}' was given to reuse but does not exist in the "
                 "workspace. Fix the name or drop --use-connection to generate a new one."
             )
-        actual = info.get("connection_type")
-        if actual != target.connection_type:
+        actual = _effective_connection_type(info)
+        if actual != _normalise_type(target.connection_type):
             return False, (
-                f"UC connection '{name}' is type {actual}, but this Fivetran connection needs "
-                f"a {target.connection_type} connection."
+                f"UC connection '{name}' is type {_describe_type(info)}, but this Fivetran "
+                f"connection needs a {target.connection_type} connection."
             )
         return True, None
+
+
+def _normalise_type(value: str | None) -> str:
+    return (value or "").replace("_", "").upper()
+
+
+def _effective_connection_type(info: dict[str, Any]) -> str:
+    # Newer managed connectors (PagerDuty, for one) are stored as API_SOURCE and name the
+    # connector in options.source_name rather than in connection_type.
+    if info.get("connection_type") == "API_SOURCE":
+        return _normalise_type((info.get("options") or {}).get("source_name"))
+    return _normalise_type(info.get("connection_type"))
+
+
+def _describe_type(info: dict[str, Any]) -> str:
+    source_name = (info.get("options") or {}).get("source_name")
+    if info.get("connection_type") == "API_SOURCE" and source_name:
+        return f"API_SOURCE (source_name={source_name})"
+    return str(info.get("connection_type"))
 
 
 def _plan_connection(
