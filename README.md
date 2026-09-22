@@ -270,8 +270,11 @@ python3 $S/generate_bundle.py -p out/plan.json -o out/bundle \
 # ──── GATE 2: Review bundle before deploying ────
 
 # Stage 6: Deploy
-cd out/bundle
-./scripts/create_connections.sh <profile>
+cd out/bundle/connections
+databricks bundle deploy --profile <profile>
+./scripts/put_secrets.sh <profile>
+databricks bundle run bootstrap_connections --profile <profile>
+cd ..
 databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
 ```
@@ -315,7 +318,9 @@ assumption is printed with every number.
 ### Stage 5: Generate
 
 Emits a Databricks Asset Bundle with ingestion pipelines, gateway pipelines
-(for CDC sources), companion jobs, and a UC connection creation script.
+(for CDC sources), and companion jobs, plus a separate `connections/` bundle:
+a secret scope and a serverless job that creates the UC connections from the
+secrets the customer stores, so no credential is written to a file.
 
 ### Stage 6: Deploy
 
