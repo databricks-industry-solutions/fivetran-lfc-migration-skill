@@ -11,9 +11,13 @@ Three structural facts from the API research shape what gets generated:
 - **There is no supported pipeline-level schedule.** Both ``trigger.cron`` and
   pipeline ``continuous`` are deprecated in favour of wrapping the pipeline in a
   Lakeflow Job, so every ingestion pipeline gets a companion job.
-- **CDC database sources need two pipelines.** A continuous gateway on classic
-  compute, plus a serverless ingestion pipeline that references the gateway by
-  its ``pipeline_id``.
+- **Gateway-based CDC sources need two pipelines.** A continuous gateway on
+  classic compute, plus a serverless ingestion pipeline that references the
+  gateway by its ``pipeline_id``.
+- **Integrated CDC sources need one pipeline.** A single serverless pipeline
+  with ``connector_type: CDC`` that references the UC connection directly and
+  stages through a ``data_staging_options`` volume, with no gateway. This is the
+  default for SQL Server; ``--sqlserver-arch gateway`` selects the pair instead.
 """
 
 from __future__ import annotations
@@ -96,11 +100,11 @@ def _root(plan: dict[str, Any], bundle_name: str, host: str | None) -> dict[str,
                 "default": catalog,
             },
             "staging_catalog": {
-                "description": "Catalog holding ingestion gateway staging volumes",
+                "description": "Catalog holding gateway and integrated CDC staging volumes",
                 "default": catalog,
             },
             "staging_schema": {
-                "description": "Schema holding ingestion gateway staging volumes",
+                "description": "Schema holding gateway and integrated CDC staging volumes",
                 "default": "ingestion_staging",
             },
         },
@@ -176,13 +180,19 @@ def _gateway_pipeline(item: dict[str, Any]) -> dict[str, Any]:
 def _ingestion_definition(item: dict[str, Any], needs_gateway: bool, key: str) -> dict[str, Any]:
     target = item["target"]
     definition: dict[str, Any] = {}
+    is_integrated_cdc = target.get("connector_type") == "CDC"
 
-    # Exactly one of these is set: a gateway id for CDC sources, a connection
-    # name for everything else.
+    # Exactly one of these is set: a gateway id for gateway-based CDC sources, a
+    # connection name for integrated CDC, SaaS, and query-based connectors.
     if needs_gateway:
         definition["ingestion_gateway_id"] = "${resources.pipelines." + key + "_gateway.id}"
     else:
         definition["connection_name"] = target["connection_name"]
+
+    # Integrated CDC pipelines must declare connector_type: CDC explicitly, or
+    # the source defaults to a query-based connector rather than change capture.
+    if is_integrated_cdc:
+        definition["connector_type"] = "CDC"
 
     # For managed SaaS connectors whose supported-table set is cataloged, omit
     # the explicit objects list and let the connector auto-discover its tables
@@ -212,6 +222,15 @@ def _ingestion_definition(item: dict[str, Any], needs_gateway: bool, key: str) -
     else:
         definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
 
+    # Integrated CDC stages extracted change data through a UC volume. Naming the
+    # catalog/schema keeps it in the bundle's staging location; the pipeline
+    # autocreates one in the destination schema if this is omitted.
+    if is_integrated_cdc:
+        definition["data_staging_options"] = {
+            "catalog_name": "${var.staging_catalog}",
+            "schema_name": "${var.staging_schema}",
+        }
+
     return definition
 
 
@@ -235,6 +254,10 @@ def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
             "destination_schema": obj["destination_schema"],
             "destination_table": obj["destination_table"],
         }
+        # source_catalog is the source database name. Required for integrated
+        # CDC; valid (and matches real gateway pipelines) when present otherwise.
+        if obj.get("source_catalog"):
+            spec = {"source_catalog": obj["source_catalog"], **spec}
 
     config = {k: v for k, v in obj["table_configuration"].items() if v}
     if config:
@@ -458,7 +481,11 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         "## Contents",
         "",
         f"- {len(migratable)} ingestion pipeline(s)",
-        f"- {summary['gateways_required']} ingestion gateway(s) for CDC database sources",
+        f"- {summary['gateways_required']} ingestion gateway(s) for gateway-based CDC sources",
+        (
+            f"- {summary.get('integrated_cdc_pipelines', 0)} integrated CDC pipeline(s) "
+            "(single pipeline, no gateway)"
+        ),
         f"- {len(migratable)} companion job(s), one per pipeline",
         f"- {summary['tables_total']} table(s) total",
         "",
@@ -483,14 +510,24 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         "",
         "- Fill in every `REPLACE_ME` in `scripts/create_connections.sh`.",
         (
-            "- Gateways run continuously on classic compute and are billed even when the "
-            "ingestion pipeline is idle."
-        ),
-        (
             "- A pipeline fails if a destination table already exists, so deploy into a clean "
             "schema or set `destination_table` explicitly."
         ),
     ]
+
+    if summary["gateways_required"]:
+        lines.append(
+            "- Gateways run continuously on classic compute and are billed even when the "
+            "ingestion pipeline is idle."
+        )
+
+    if summary.get("integrated_cdc_pipelines"):
+        lines.append(
+            "- Integrated CDC pipelines (`connector_type: CDC`) need the integrated CDC "
+            "connector enabled on the workspace by the Databricks account team, and stage "
+            "through the `${var.staging_catalog}.${var.staging_schema}` volume the pipeline "
+            "creates. They run in triggered mode on their companion job."
+        )
 
     if manual:
         lines += [

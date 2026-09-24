@@ -40,7 +40,8 @@ class Gateway(str, Enum):
     REQUIRED = "required"
     NOT_REQUIRED = "not_required"
     # The set of sources needing a gateway is not authoritatively published.
-    # SQL Server is confirmed; Oracle uses integrated CDC with no gateway.
+    # SQL Server offers both: gateway-based CDC and integrated CDC (no gateway).
+    # Oracle uses integrated CDC with no gateway.
     UNKNOWN = "unknown"
 
 
@@ -78,6 +79,11 @@ class Target:
     category: Category
     availability: Availability = Availability.UNVERIFIED
     gateway: Gateway = Gateway.NOT_REQUIRED
+    #: Whether the source offers a single-pipeline integrated CDC connector
+    #: (``connector_type: CDC``, no separate gateway) as an alternative to the
+    #: gateway-based architecture. The plan picks the architecture; this only
+    #: records that the choice exists.
+    supports_integrated_cdc: bool = False
     scriptable: Scriptable = Scriptable.YES
     #: Why it is not scriptable, or what the scriptable path requires.
     auth_note: str = ""
@@ -374,11 +380,20 @@ CATALOG: dict[str, Target] = {
             category=Category.DATABASE_CDC,
             availability=Availability.GA,
             gateway=Gateway.REQUIRED,
+            supports_integrated_cdc=True,
             source_prerequisites=_SQLSERVER_PREREQ,
+            docs_url=(
+                "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
+                "sql-server-integrated-pipeline"
+            ),
             notes=(
-                "Standard architecture needs a gateway on classic compute running "
-                "continuously, billed even while the ingestion pipeline is idle. Newer "
-                "integrated CDC removes the gateway."
+                "Two GA architectures. Integrated CDC (connector_type: CDC) runs one "
+                "serverless pipeline that references the UC connection directly and stages "
+                "through a UC volume, with no separate gateway -- the default the plan "
+                "generates. The standard architecture instead runs a continuous gateway on "
+                "classic compute plus an ingestion pipeline, billed even while idle; select "
+                "it with --sqlserver-arch gateway. Integrated CDC must be enabled on the "
+                "workspace by the Databricks account team."
             ),
         )
         for service in ("sql_server", "sql_server_rds", "sql_server_hva", "azure_sql_db")

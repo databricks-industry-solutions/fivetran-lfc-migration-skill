@@ -19,7 +19,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.mapping import build_plan
+from ftlfc.mapping import (
+    SQLSERVER_ARCH_CHOICES,
+    SQLSERVER_ARCH_INTEGRATED,
+    build_plan,
+)
 from ftlfc.workspace import WorkspaceError, cli_connection_lookup
 
 
@@ -46,6 +50,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--databricks-profile",
         help="CLI profile of the target workspace, to confirm reused connections exist",
+    )
+    parser.add_argument(
+        "--sqlserver-arch",
+        choices=SQLSERVER_ARCH_CHOICES,
+        default=SQLSERVER_ARCH_INTEGRATED,
+        help=(
+            "SQL Server architecture: 'integrated' (default) generates a single "
+            "integrated CDC pipeline with no gateway; 'gateway' generates the "
+            "gateway-based pair on classic compute"
+        ),
     )
     parser.add_argument("-o", "--output", default="out/plan.json")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -89,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             include_paused=args.include_paused,
             existing_connections=existing,
             lookup_connection=lookup,
+            sqlserver_arch=args.sqlserver_arch,
         )
     except (ValueError, WorkspaceError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -138,6 +153,12 @@ def _report(plan: dict, destination: Path) -> None:
         f"  {summary['jobs_required']} jobs and {summary['gateways_required']} gateways to create "
         "alongside the pipelines"
     )
+    integrated = summary.get("integrated_cdc_pipelines", 0)
+    if integrated:
+        print(
+            f"  {integrated} SQL Server integrated CDC pipeline(s) (no gateway; "
+            "use --sqlserver-arch gateway for the gateway-based architecture)"
+        )
 
     if summary["by_effort"]:
         print("  effort breakdown:")

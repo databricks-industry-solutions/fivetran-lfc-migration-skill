@@ -19,6 +19,13 @@ from .catalog import Availability, Category, Effort, Gateway, Scriptable, Target
 
 STALENESS_DAYS = 90
 
+#: SQL Server (and other integrated-CDC-capable sources) can be generated as a
+#: single integrated CDC pipeline or as the older gateway-based pair. Integrated
+#: is the default because it removes the continuously-billed gateway.
+SQLSERVER_ARCH_INTEGRATED = "integrated"
+SQLSERVER_ARCH_GATEWAY = "gateway"
+SQLSERVER_ARCH_CHOICES = (SQLSERVER_ARCH_INTEGRATED, SQLSERVER_ARCH_GATEWAY)
+
 # Fivetran attaches sync frequency to the connector. Databricks has no supported
 # pipeline-level schedule, so each pipeline needs a companion job. Quartz format
 # is: seconds minutes hours day-of-month month day-of-week.
@@ -62,13 +69,22 @@ def build_plan(
     include_paused: bool = False,
     existing_connections: dict[str, str] | None = None,
     lookup_connection: ConnectionLookup | None = None,
+    sqlserver_arch: str = SQLSERVER_ARCH_INTEGRATED,
 ) -> dict[str, Any]:
     """Produce a migration plan from a discovery inventory.
 
     ``existing_connections`` maps a Fivetran connection id or service name to a
     UC connection that already exists and should be reused rather than created.
     ``lookup_connection``, when given, confirms each one exists with the right type.
+    ``sqlserver_arch`` selects the SQL Server architecture: ``integrated`` (the
+    default single-pipeline integrated CDC connector) or ``gateway`` (the older
+    gateway-based pair).
     """
+    if sqlserver_arch not in SQLSERVER_ARCH_CHOICES:
+        raise ValueError(
+            f"sqlserver_arch must be one of {', '.join(SQLSERVER_ARCH_CHOICES)}, "
+            f"got '{sqlserver_arch}'"
+        )
     connections = [
         c for c in inventory.get("connections", []) if include_paused or not c.get("paused")
     ]
@@ -83,7 +99,9 @@ def build_plan(
         )
 
     reuse = _ReuseContext(existing, lookup_connection)
-    items = [_plan_connection(c, target_catalog, mar, reuse) for c in connections]
+    items = [
+        _plan_connection(c, target_catalog, mar, reuse, sqlserver_arch) for c in connections
+    ]
 
     return {
         "schema_version": PLAN_SCHEMA_VERSION,
@@ -160,10 +178,17 @@ def _plan_connection(
     target_catalog: str,
     mar: dict[str, Any] | None,
     reuse: _ReuseContext,
+    sqlserver_arch: str = SQLSERVER_ARCH_INTEGRATED,
 ) -> dict[str, Any]:
     service = connection.get("service") or ""
     target = lookup(service)
     name = to_identifier(connection.get("destination_schema") or service, connection.get("id"))
+
+    use_integrated = (
+        target.supports_integrated_cdc and sqlserver_arch == SQLSERVER_ARCH_INTEGRATED
+    )
+    # The effective gateway requirement, once the architecture choice is applied.
+    effective_gateway = Gateway.NOT_REQUIRED if use_integrated else target.gateway
 
     reused_name = reuse.name_for(connection) if target.has_managed_connector else None
     verified, reuse_blocker = reuse.check(reused_name, target) if reused_name else (False, None)
@@ -178,6 +203,7 @@ def _plan_connection(
         reused_name=reused_name,
         verified=verified,
         checked=reuse.can_check,
+        use_integrated=use_integrated,
     )
     if reuse_blocker:
         blockers.append(reuse_blocker)
@@ -200,7 +226,9 @@ def _plan_connection(
             "connection_type": target.connection_type,
             "category": target.category.value,
             "availability": target.availability.value,
-            "gateway": target.gateway.value,
+            "gateway": effective_gateway.value,
+            "architecture": _architecture(target, effective_gateway, use_integrated),
+            "connector_type": "CDC" if use_integrated else None,
             "scriptable": target.scriptable.value,
             "preferred_auth": target.preferred_auth,
             "effort": _effort(target, reused=bool(reused_name)).value,
@@ -212,10 +240,22 @@ def _plan_connection(
         },
         "objects": objects,
         "schedule": schedule,
-        "prerequisites": _prerequisites(target),
+        "prerequisites": _prerequisites(target, effective_gateway, use_integrated),
         "blockers": blockers,
         "warnings": warnings + obj_warnings,
     }
+
+
+def _architecture(target: Target, effective_gateway: Gateway, use_integrated: bool) -> str | None:
+    """Name the ingestion architecture for a CDC database source.
+
+    ``None`` for non-database sources, where the concept does not apply.
+    """
+    if target.category is not Category.DATABASE_CDC:
+        return None
+    if use_integrated:
+        return "integrated_cdc"
+    return "gateway" if effective_gateway is Gateway.REQUIRED else "managed_cdc"
 
 
 def _effort(target: Target, reused: bool) -> Effort:
@@ -251,6 +291,9 @@ def _plan_objects(
     destination_schema = to_identifier(
         connection.get("destination_schema") or connection.get("service")
     )
+    # The source database is required as source_catalog for integrated CDC, and
+    # is a valid (optional) field for the gateway-based ingestion pipeline too.
+    source_catalog = (connection.get("config") or {}).get("database") or None
     specs: list[dict[str, Any]] = []
     dropped: list[str] = []
     keyless: list[str] = []
@@ -294,9 +337,11 @@ def _plan_objects(
                 "at ingest; reproduce with a downstream masking policy or transformation."
             )
 
+        is_database = target.category is Category.DATABASE_CDC
         specs.append(
             {
                 "type": "report" if target.connection_type == "WORKDAY_RAAS" else "table",
+                "source_catalog": source_catalog if is_database else None,
                 "source_schema": target.fixed_source_schema or table.get("source_schema"),
                 "fivetran_source_schema": table.get("source_schema"),
                 "source_table": table.get("source_table"),
@@ -406,11 +451,22 @@ def _plan_schedule(connection: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _prerequisites(target: Target) -> dict[str, Any]:
+def _prerequisites(
+    target: Target,
+    effective_gateway: Gateway = Gateway.NOT_REQUIRED,
+    use_integrated: bool = False,
+) -> dict[str, Any]:
     steps: list[str] = []
     if target.source_prerequisites:
         steps.append(target.source_prerequisites)
-    if target.gateway is Gateway.REQUIRED:
+    if use_integrated:
+        steps.append(
+            "Enable the integrated CDC connector on the workspace (through the Databricks "
+            "account team) before deploying. The single pipeline stages through a Unity "
+            "Catalog volume it creates in the destination schema unless data_staging_options "
+            "names another, so the ingestion identity needs CREATE VOLUME on that schema."
+        )
+    elif effective_gateway is Gateway.REQUIRED:
         steps.append(
             "Create an ingestion gateway pipeline first. It runs continuously on classic "
             "compute and is billed even while the ingestion pipeline is idle. The ingestion "
@@ -431,6 +487,7 @@ def _assess(
     reused_name: str | None = None,
     verified: bool = False,
     checked: bool = False,
+    use_integrated: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Separate what stops the migration from what merely needs attention."""
     blockers: list[str] = []
@@ -442,6 +499,16 @@ def _assess(
             f"No managed Lakeflow Connect connector for '{service}'. {target.alternative}"
         )
         return blockers, warnings
+
+    if use_integrated:
+        warnings.append(
+            "Generated as an integrated CDC pipeline (connector_type: CDC, no gateway). "
+            "The integrated CDC connector must be enabled on the target workspace by the "
+            "Databricks account team; confirm before deploying. The pipeline runs in "
+            "triggered mode on its companion job (continuous mode is Beta), and does not "
+            "support read replicas or standby instances. To fall back to the gateway-based "
+            "architecture, re-run with --sqlserver-arch gateway."
+        )
 
     # An existing connection already carries its auth, so neither the sign-in
     # step nor the source-side setup behind a SaaS credential applies.
@@ -570,6 +637,9 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
 
     migratable = [i for i in items if not i["blockers"]]
     needs_gateway = [i for i in items if i["target"]["gateway"] == Gateway.REQUIRED.value]
+    integrated_cdc = [
+        i for i in migratable if i["target"].get("architecture") == "integrated_cdc"
+    ]
     reused = [i for i in migratable if i["target"].get("connection_source") == "existing"]
     manual_connections = [
         i
@@ -599,6 +669,7 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
             if o["table_configuration"].get("scd_type") == "SCD_TYPE_2"
         ),
         "gateways_required": len(needs_gateway),
+        "integrated_cdc_pipelines": len(integrated_cdc),
         "jobs_required": len(migratable),
         "by_effort": by_effort,
         "by_category": by_category,

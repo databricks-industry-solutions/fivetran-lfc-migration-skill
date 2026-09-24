@@ -106,6 +106,38 @@
       "counts": {"tables_enabled": 1, "tables_history_mode": 0}
     },
     {
+      "id": "gallant_ledger",
+      "group_id": "schoolmaster_heedless",
+      "service": "postgres_rds",
+      "destination_schema": "billing",
+      "paused": false,
+      "sync_frequency_minutes": 60,
+      "schedule_type": "auto",
+      "networking_method": "Directly",
+      "status": {"setup_state": "connected", "sync_state": "scheduled"},
+      "config": {"host": "billing.example.internal", "database": "BillingProd"},
+      "schema_change_handling": "ALLOW_ALL",
+      "objects": [
+        {
+          "source_schema": "public",
+          "source_table": "invoices",
+          "destination_schema": "billing",
+          "destination_table": "invoices",
+          "schema_enabled": true,
+          "enabled": true,
+          "sync_mode": "SOFT_DELETE",
+          "retains_history": false,
+          "supports_columns_config": true,
+          "columns_complete": true,
+          "primary_keys": ["id"],
+          "primary_keys_known": true,
+          "hashed_columns": [],
+          "excluded_columns": []
+        }
+      ],
+      "counts": {"tables_enabled": 1, "tables_history_mode": 0}
+    },
+    {
       "id": "brittle_marmalade",
       "group_id": "schoolmaster_heedless",
       "service": "hubspot",
@@ -150,13 +182,19 @@
   ],
   "transformations": [],
   "summary": {
-    "connections_total": 4,
-    "connections_active": 4,
+    "connections_total": 5,
+    "connections_active": 5,
     "connections_paused": 0,
     "connections_broken": 0,
-    "distinct_services": 4,
-    "connections_by_service": {"salesforce": 1, "sql_server_rds": 1, "hubspot": 1, "s3": 1},
-    "tables_enabled": 4,
+    "distinct_services": 5,
+    "connections_by_service": {
+      "salesforce": 1,
+      "sql_server_rds": 1,
+      "postgres_rds": 1,
+      "hubspot": 1,
+      "s3": 1
+    },
+    "tables_enabled": 5,
     "tables_history_mode": 1,
     "tables_primary_keys_unknown": 1,
     "columns_hashed": 1,
