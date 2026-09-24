@@ -142,7 +142,7 @@ Upload the **entire** skill folder: `SKILL.md`, `requirements.txt`,
 
 - Genie Code **Agent mode** enabled
 - Permission to write under `.assistant/skills/` (user folder or workspace folder)
-- Fivetran **Account Settings > API Config** key + secret (read-only; Standard plan or above)
+- Fivetran **Account Settings > API Config** key + secret (read-only; Standard plan or above), stored by the customer in a **Databricks secret scope** (see step 3)
 - A SQL warehouse the user can query, if MAR lives in Databricks (stage 2) or for system-table telemetry (stage 2.5)
 - `SELECT` on `system.billing.list_prices` (and related system tables) if you want grounded DBU rates
 
@@ -203,13 +203,34 @@ description looks stale).
    - *Migrate Fivetran connectors to Lakeflow Connect*
    - *Run the Fivetran to Lakeflow Connect skill end to end, stop at each review gate*
 
-3. When asked, set Fivetran credentials **in that session** (do not paste them
-   into notebooks that will be committed):
+3. Provide Fivetran credentials from a **Databricks secret scope** so they
+   stay in the workspace and never get pasted into a committed notebook.
+
+   The customer creates the scope once (any machine with the workspace CLI
+   profile; skip if it already exists):
 
    ```bash
-   export FIVETRAN_API_KEY=...
-   export FIVETRAN_API_SECRET=...
+   PROFILE=<workspace-profile>
+   databricks secrets create-scope fivetran --profile "$PROFILE"
+   databricks secrets put-secret fivetran api-key \
+     --string-value <fivetran-api-key> --profile "$PROFILE"
+   databricks secrets put-secret fivetran api-secret \
+     --string-value <fivetran-api-secret> --profile "$PROFILE"
    ```
+
+   Then, in the Genie Code session, point the skill at that scope by reading the
+   values and exporting the environment variables the stages already use
+   (Genie Code runs on Databricks compute, so `dbutils` is available):
+
+   ```bash
+   export FIVETRAN_API_KEY=$(python3 -c "from databricks.sdk.runtime import dbutils; print(dbutils.secrets.get('fivetran','api-key'))")
+   export FIVETRAN_API_SECRET=$(python3 -c "from databricks.sdk.runtime import dbutils; print(dbutils.secrets.get('fivetran','api-secret'))")
+   ```
+
+   Use whatever scope and key names the customer chose. Because Genie Code may
+   run each bash step in a fresh shell, re-export these at the start of any step
+   that calls the Fivetran API (stage 1 discovery). No skill code changes are
+   needed — the scripts read `FIVETRAN_API_KEY` / `FIVETRAN_API_SECRET` as usual.
 
 4. Confirm the agent runs **preflight** first (`scripts/preflight.py --export
    --install-deps`) so `${SCRIPTS}` and `${FTLFC_OUT}` exist. Genie Code does
