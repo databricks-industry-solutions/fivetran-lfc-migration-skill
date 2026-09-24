@@ -301,6 +301,16 @@ python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json -c <dest_cat
   --mar ${FTLFC_OUT}/mar.json -o ${FTLFC_OUT}/plan.json
 ```
 
+**SQL Server architecture.** By default the planner targets **integrated CDC**:
+one serverless pipeline with `connector_type: CDC` that references the UC
+connection directly and stages through a Unity Catalog volume, with no gateway.
+This removes the continuously-billed classic-compute gateway that the standard
+architecture requires. Pass `--sqlserver-arch gateway` to generate the older
+gateway-based pair instead (for example, if the workspace does not yet have the
+integrated CDC connector enabled). Integrated CDC must be turned on for the
+workspace by the Databricks account team, so confirm it before the customer
+commits; the plan emits this as a warning on every SQL Server connection.
+
 The plan classifies every connection by effort, and the distinction that
 matters is not "supported" but *who has to do the work*:
 
@@ -408,10 +418,12 @@ python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
 ```
 
 Produces a bundle the customer keeps in their own repo: one ingestion pipeline
-per connection, a gateway pipeline where CDC needs one, and a companion job per
-pipeline. Managed ingestion pipelines have no supported pipeline-level schedule,
-which is why every pipeline gets a job carrying the cron translated from
-Fivetran's sync frequency.
+per connection, a gateway pipeline where gateway-based CDC needs one, and a
+companion job per pipeline. SQL Server integrated CDC connections generate a
+single serverless pipeline (`connector_type: CDC`, `data_staging_options`) with
+no gateway file. Managed ingestion pipelines have no supported pipeline-level
+schedule, which is why every pipeline gets a job carrying the cron translated
+from Fivetran's sync frequency.
 
 Unity Catalog connections are *not* bundle resources, because credentials must
 not be committed. They are emitted as `scripts/create_connections.sh` with
@@ -519,6 +531,11 @@ Load these only when you need the detail; they are long.
 - Salesforce objects resolve under a source schema literally named `objects`,
   not the schema name Fivetran used. The mapper rewrites this and warns.
 - Ingestion pipelines cannot run in `continuous` mode; only gateways can, and
-  gateways must.
-- SQL Server has two architectures: gateway-based CDC, and integrated CDC
-  (`connector_type: CDC`, Beta) with no separate gateway.
+  gateways must. (Integrated CDC pipelines can run continuous mode in Beta, but
+  the skill schedules them through a triggered companion job.)
+- SQL Server has two GA architectures: gateway-based CDC (a continuous gateway
+  plus an ingestion pipeline) and integrated CDC (`connector_type: CDC`, one
+  serverless pipeline, no gateway, staged through a `data_staging_options`
+  volume). The skill generates integrated CDC by default; `--sqlserver-arch
+  gateway` selects the pair. Integrated CDC needs the connector enabled on the
+  workspace by the Databricks account team.

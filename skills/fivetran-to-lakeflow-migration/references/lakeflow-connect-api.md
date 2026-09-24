@@ -474,8 +474,8 @@ databricks connections delete my_conn
 | `ingest_from_uc_foreign_catalog` | boolean | Public Preview | If true, ingest from UC foreign catalogs with no connection or gateway; `source_catalog` in each object is then read as the foreign catalog name |
 | `source_configurations` | array of `SourceConfig` | Public Preview | Top-level per-source config. Contains `catalog` (a `SourceCatalogConfig`) and `google_ads_config` (private) |
 | `full_refresh_window` | `OperationTimeWindow` | Public Preview | `{ start_hour: int(0-23) [required], days_of_week: [...], time_zone_id: string }`. Constrains when CDC snapshot queries may run |
-| `connector_type` | enum | **PRIVATE preview** | `CDC` / `QUERY_BASED`. `[SCHEMA]` marked `doNotSuggest` |
-| `data_staging_options` | object | **PRIVATE preview** | For migrating gateway-based CDC to combined CDC |
+| `connector_type` | enum | GA for SQL Server integrated CDC | `CDC` / `QUERY_BASED`. `[DOCS]` The [SQL Server integrated pipeline page](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-integrated-pipeline) documents `connector_type: CDC` as the integrated (single-pipeline, no-gateway) architecture. `[SCHEMA]` still marked `doNotSuggest` in CLI v1.1.0, but the field is valid and validates in a bundle. Set `CDC` for integrated ingestion; if omitted for a DB connection it defaults to `QUERY_BASED` |
+| `data_staging_options` | object | GA for SQL Server integrated CDC | `{ "catalog_name": string, "schema_name": string }`. `[DOCS]` The catalog/schema where an integrated CDC pipeline creates its staging volume; the pipeline autocreates one in the destination schema if omitted |
 | `netsuite_jar_path` | string | **PRIVATE preview** | |
 
 `[DOCS]` On the `connection_name` / `ingestion_gateway_id` relationship:
@@ -781,6 +781,43 @@ Response contains `{"pipeline_id": "<GATEWAY_PIPELINE_ID>"}`.
 databricks pipelines create --json @gateway.json     # capture pipeline_id
 databricks pipelines create --json @ingestion.json
 ```
+
+### (c) SQL Server integrated CDC — single pipeline, no gateway
+
+`[DOCS]` The [SQL Server integrated pipeline page](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-integrated-pipeline) (GA). One `POST /api/2.0/pipelines` with `connector_type: CDC` referencing the UC connection directly. No gateway pipeline, so no `ingestion_gateway_id`. `source_catalog` is the SQL Server database name. `data_staging_options` names where the pipeline creates its staging volume; omit it and the pipeline autocreates one in the destination schema.
+
+```json
+{
+  "name": "sqlserver_integrated_cdc_prod",
+  "catalog": "main",
+  "schema": "erp",
+  "serverless": true,
+  "channel": "CURRENT",
+  "ingestion_definition": {
+    "connection_name": "sqlserver_prod",
+    "connector_type": "CDC",
+    "objects": [
+      {
+        "table": {
+          "source_catalog": "ERPProd",
+          "source_schema": "dbo",
+          "source_table": "Orders",
+          "destination_catalog": "main",
+          "destination_schema": "erp",
+          "destination_table": "orders",
+          "table_configuration": { "scd_type": "SCD_TYPE_1" }
+        }
+      }
+    ],
+    "data_staging_options": {
+      "catalog_name": "main",
+      "schema_name": "ingestion_staging"
+    }
+  }
+}
+```
+
+`[DOCS]` Notes: integrated CDC runs on serverless (`serverless: true`) or classic compute (the API default `false`). It requires the integrated CDC connector to be enabled on the workspace (account team). `SCD_TYPE_2` requires SQL Server CDC on the source, not change tracking. Only SQL Server and Oracle are supported source types for `connector_type: CDC`. Schedule it with a Lakeflow Job (triggered); continuous mode is Beta. The gateway-based and integrated architectures are mutually exclusive per pipeline, and `connection_name`/`connector_type` are immutable after creation.
 
 ## 2.7 Top-level pipeline fields for managed ingestion
 

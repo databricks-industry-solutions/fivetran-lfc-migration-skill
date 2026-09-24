@@ -26,6 +26,17 @@ class TestCatalog:
     def test_oracle_uses_integrated_cdc_without_a_gateway(self) -> None:
         assert lookup("oracle").gateway is Gateway.NOT_REQUIRED
 
+    def test_sql_server_advertises_integrated_cdc_capability(self) -> None:
+        # The catalog records the gateway-based architecture as the standard fact
+        # and flags that an integrated CDC path exists; the plan picks between them.
+        target = lookup("sql_server")
+        assert target.gateway is Gateway.REQUIRED
+        assert target.supports_integrated_cdc is True
+
+    def test_non_sqlserver_databases_do_not_advertise_integrated_cdc(self) -> None:
+        for service in ("postgres", "mysql"):
+            assert lookup(service).supports_integrated_cdc is False, service
+
     def test_source_variants_share_one_target(self) -> None:
         for service in ("postgres", "postgres_rds", "aurora_postgres"):
             assert lookup(service).connection_type == "POSTGRESQL"
@@ -297,9 +308,50 @@ class TestBuildPlan:
         )
         assert any("PrivateLink" in w for w in plan["items"][0]["warnings"])
 
-    def test_gateway_requirement_is_counted(self) -> None:
+    def test_sql_server_defaults_to_integrated_cdc_without_a_gateway(self) -> None:
         plan = build_plan(_inventory(_connection(objects=[_table()])), "main_prod")
+        target = plan["items"][0]["target"]
+        assert target["gateway"] == "not_required"
+        assert target["connector_type"] == "CDC"
+        assert target["architecture"] == "integrated_cdc"
+        assert plan["summary"]["gateways_required"] == 0
+        assert plan["summary"]["integrated_cdc_pipelines"] == 1
+
+    def test_sql_server_gateway_architecture_is_opt_in(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(objects=[_table()])), "main_prod", sqlserver_arch="gateway"
+        )
+        target = plan["items"][0]["target"]
+        assert target["gateway"] == "required"
+        assert target["connector_type"] is None
+        assert target["architecture"] == "gateway"
         assert plan["summary"]["gateways_required"] == 1
+        assert plan["summary"]["integrated_cdc_pipelines"] == 0
+
+    def test_integrated_cdc_captures_the_source_database_as_source_catalog(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(config={"database": "ERPProd"}, objects=[_table()])),
+            "main_prod",
+        )
+        assert plan["items"][0]["objects"][0]["source_catalog"] == "ERPProd"
+
+    def test_integrated_cdc_warns_about_the_workspace_feature_flag(self) -> None:
+        item = build_plan(_inventory(_connection(objects=[_table()])), "main_prod")["items"][0]
+        assert any("integrated CDC connector must be enabled" in w for w in item["warnings"])
+        assert item["blockers"] == []
+
+    def test_postgres_still_uses_a_gateway(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="postgres", objects=[_table()])), "main_prod"
+        )
+        target = plan["items"][0]["target"]
+        assert target["gateway"] == "required"
+        assert target["connector_type"] is None
+        assert target["architecture"] == "gateway"
+
+    def test_invalid_sqlserver_arch_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sqlserver_arch"):
+            build_plan(_inventory(_connection()), "main_prod", sqlserver_arch="nonsense")
 
     def test_every_migratable_pipeline_gets_a_job(self) -> None:
         # Databricks has no supported pipeline-level schedule, so the job count

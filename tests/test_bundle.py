@@ -195,6 +195,86 @@ class TestGatewayPipeline:
         assert "connection_name" not in definition
 
 
+def _integrated_cdc_item(gateway: str = "not_required", **overrides) -> dict:
+    item = _item(
+        key="erp_abc",
+        connection_type="SQLSERVER",
+        gateway=gateway,
+        objects=[
+            {
+                "type": "table",
+                "source_catalog": "ERPProd",
+                "source_schema": "dbo",
+                "source_table": "Orders",
+                "destination_catalog": "main",
+                "destination_schema": "erp",
+                "destination_table": "orders",
+                "table_configuration": {"scd_type": "SCD_TYPE_1"},
+                "primary_keys_known": False,
+            }
+        ],
+        **overrides,
+    )
+    item["target"]["category"] = "database_cdc"
+    item["target"]["architecture"] = "integrated_cdc"
+    item["target"]["connector_type"] = "CDC"
+    return item
+
+
+class TestIntegratedCdcPipeline:
+    @pytest.fixture
+    def files(self) -> dict[str, str]:
+        return build_bundle(_plan(_integrated_cdc_item()), "acme")
+
+    @pytest.fixture
+    def pipeline(self, files: dict[str, str]) -> dict:
+        return _load(files, "resources/erp_abc.pipeline.yml")["resources"]["pipelines"]["erp_abc"]
+
+    def test_no_gateway_file_is_emitted(self, files: dict[str, str]) -> None:
+        assert not any("gateway" in name for name in files)
+
+    def test_runs_a_single_serverless_pipeline(self, pipeline: dict) -> None:
+        assert pipeline["serverless"] is True
+
+    def test_references_the_connection_directly_with_connector_type_cdc(
+        self, pipeline: dict
+    ) -> None:
+        definition = pipeline["ingestion_definition"]
+        assert definition["connection_name"] == "conn_erp_abc"
+        assert definition["connector_type"] == "CDC"
+        assert "ingestion_gateway_id" not in definition
+
+    def test_declares_a_staging_volume(self, pipeline: dict) -> None:
+        staging = pipeline["ingestion_definition"]["data_staging_options"]
+        assert staging["catalog_name"] == "${var.staging_catalog}"
+        assert staging["schema_name"] == "${var.staging_schema}"
+
+    def test_table_object_carries_the_source_database_as_source_catalog(
+        self, pipeline: dict
+    ) -> None:
+        table = pipeline["ingestion_definition"]["objects"][0]["table"]
+        assert table["source_catalog"] == "ERPProd"
+        assert table["source_schema"] == "dbo"
+        assert table["source_table"] == "Orders"
+
+    def test_gets_a_companion_job(self, files: dict[str, str]) -> None:
+        assert "resources/erp_abc.job.yml" in files
+
+    def test_gateway_architecture_omits_connector_type_and_staging(self) -> None:
+        # The same source generated as the gateway pair must not leak integrated fields.
+        item = _integrated_cdc_item(gateway="required")
+        item["target"]["architecture"] = "gateway"
+        item["target"]["connector_type"] = None
+        files = build_bundle(_plan(item), "acme")
+        assert "resources/erp_abc_gateway.pipeline.yml" in files
+        definition = _load(files, "resources/erp_abc.pipeline.yml")["resources"]["pipelines"][
+            "erp_abc"
+        ]["ingestion_definition"]
+        assert "connector_type" not in definition
+        assert "data_staging_options" not in definition
+        assert "ingestion_gateway_id" in definition
+
+
 class TestJob:
     def test_every_pipeline_gets_a_companion_job(self) -> None:
         # There is no supported pipeline-level schedule.
