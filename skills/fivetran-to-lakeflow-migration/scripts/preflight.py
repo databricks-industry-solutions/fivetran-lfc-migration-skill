@@ -121,7 +121,7 @@ def build_result(
             "discover": {"needs": ["fivetran_credentials"], "optional": []},
             "measure": {"needs": ["databricks_cli"], "optional": ["fivetran_credentials"]},
             "map": {"needs": [], "optional": []},
-            "compare": {"needs": [], "optional": []},
+            "consumption": {"needs": [], "optional": ["databricks_cli"]},
             "generate": {"needs": [], "optional": []},
             "deploy": {"needs": ["databricks_cli"], "optional": []},
         },

@@ -345,7 +345,7 @@ def _normalise_transformations(client: FivetranClient) -> list[dict[str, Any]]:
 
 
 def summarise(connections: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate counts used by the discovery report and the cost model."""
+    """Aggregate counts used by the discovery report and the plan."""
     by_service: dict[str, int] = {}
     for connection in connections:
         service = connection.get("service") or "unknown"

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Stage 2 - collect Fivetran MAR and spend from the Platform Connector.
+"""Stage 2 - collect Fivetran MAR and billing from the Platform Connector.
 
-No Fivetran REST endpoint exposes MAR or cost, so this reads the Platform
-Connector tables in the customer's destination warehouse.
+No Fivetran REST endpoint exposes MAR or billing, so this reads the Platform
+Connector tables in the customer's destination warehouse: incremental_mar,
+usage_cost, and credits_used (credit-based plans only). Figures are recorded
+as given; nothing is priced.
 
     # Destination is Databricks: query it directly.
     python3 fivetran_mar.py --warehouse-id abc123 --profile prod -o out/mar.json
@@ -41,14 +43,15 @@ from ftlfc.mar import (
     RedshiftConfig,
     SnowflakeConfig,
     aggregate,
-    build_cost_query,
+    build_billing_queries,
     build_mar_query,
+    check_identifier,
     detect_bigquery_platform_schema,
     detect_platform_schema,
     detect_redshift_platform_schema,
     detect_snowflake_platform_schema,
     load_csv,
-    load_rows,
+    load_platform_connector,
     run_bigquery_query,
     run_databricks_query,
     run_redshift_query,
@@ -147,19 +150,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_sql:
         schema = args.schema or PLATFORM_SCHEMAS[0]
         print(f"-- Fivetran MAR, {args.months} months. Export the result as CSV.")
+        print("-- On older installs, replace connection_name with connector_name.")
         print(build_mar_query(schema, args.months))
-        print()
-        print("-- Fivetran spend. Exactly one branch returns rows (dollars or credits).")
-        print(build_cost_query(schema, args.months))
+        for metric, sql in build_billing_queries(schema, args.months).items():
+            print()
+            print(f"-- Fivetran billing ({metric}). Skip it if the table does not exist.")
+            print(sql)
         return 0
 
     try:
-        records, cost_rows = _load(args)
+        records, billing_rows = _load(args)
     except MarError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if not records:
+    if not any(r.paid for r in records):
         print(
             "error: no paid MAR rows found. The Platform Connector may be newly created, "
             "or the account may be on a plan where all usage is free-tier.",
@@ -181,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         "source": source_label,
         "months_requested": args.months,
         "mar": summary,
-        "spend": cost_rows,
+        "billing": billing_rows,
         "records": [r.__dict__ for r in records],
     }
 
@@ -189,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, default=str) + "\n")
 
-    _report(destination, summary, cost_rows)
+    _report(destination, summary, billing_rows)
     return 0
 
 
@@ -241,21 +246,17 @@ def _load(args: argparse.Namespace) -> tuple[list, list]:
             "--redshift, --csv, or --print-sql."
         )
 
+    if args.catalog:
+        check_identifier(args.catalog)
     schema = args.schema or detect_platform_schema(args.warehouse_id, args.profile, args.catalog)
     if args.schema and args.catalog:
         schema = f"{args.catalog}.{args.schema}"
 
-    records = load_rows(
-        run_databricks_query(build_mar_query(schema, args.months), args.warehouse_id, args.profile)
+    return load_platform_connector(
+        lambda sql: run_databricks_query(sql, args.warehouse_id, args.profile),
+        schema,
+        args.months,
     )
-    try:
-        cost_rows = run_databricks_query(
-            build_cost_query(schema, args.months), args.warehouse_id, args.profile
-        )
-    except MarError as exc:
-        logging.warning("Spend tables unavailable (%s); continuing with MAR only", exc)
-        cost_rows = []
-    return records, cost_rows
 
 
 def _load_from_snowflake(args: argparse.Namespace) -> tuple[list, list]:
@@ -265,15 +266,9 @@ def _load_from_snowflake(args: argparse.Namespace) -> tuple[list, list]:
     schema = args.schema or detect_snowflake_platform_schema(config)
     qualified = f"{config.database}.{schema}"
 
-    records = load_rows(
-        run_snowflake_query(build_mar_query(qualified, args.months), config)
+    return load_platform_connector(
+        lambda sql: run_snowflake_query(sql, config), qualified, args.months
     )
-    try:
-        cost_rows = run_snowflake_query(build_cost_query(qualified, args.months), config)
-    except MarError as exc:
-        logging.warning("Spend tables unavailable (%s); continuing with MAR only", exc)
-        cost_rows = []
-    return records, cost_rows
 
 
 def _load_from_bigquery(args: argparse.Namespace) -> tuple[list, list]:
@@ -283,17 +278,9 @@ def _load_from_bigquery(args: argparse.Namespace) -> tuple[list, list]:
     schema = args.schema or detect_bigquery_platform_schema(config)
     qualified = f"`{config.project}.{schema}`"
 
-    # BigQuery uses backtick-qualified table names in the query
-    mar_sql = build_mar_query(qualified, args.months)
-    cost_sql = build_cost_query(qualified, args.months)
-
-    records = load_rows(run_bigquery_query(mar_sql, config))
-    try:
-        cost_rows = run_bigquery_query(cost_sql, config)
-    except MarError as exc:
-        logging.warning("Spend tables unavailable (%s); continuing with MAR only", exc)
-        cost_rows = []
-    return records, cost_rows
+    return load_platform_connector(
+        lambda sql: run_bigquery_query(sql, config), qualified, args.months
+    )
 
 
 def _build_bigquery_config(args: argparse.Namespace) -> BigQueryConfig:
@@ -322,15 +309,9 @@ def _load_from_redshift(args: argparse.Namespace) -> tuple[list, list]:
 
     schema = args.schema or detect_redshift_platform_schema(config)
 
-    records = load_rows(
-        run_redshift_query(build_mar_query(schema, args.months), config)
+    return load_platform_connector(
+        lambda sql: run_redshift_query(sql, config), schema, args.months
     )
-    try:
-        cost_rows = run_redshift_query(build_cost_query(schema, args.months), config)
-    except MarError as exc:
-        logging.warning("Spend tables unavailable (%s); continuing with MAR only", exc)
-        cost_rows = []
-    return records, cost_rows
 
 
 def _build_redshift_config(args: argparse.Namespace) -> RedshiftConfig:
@@ -352,10 +333,12 @@ def _build_redshift_config(args: argparse.Namespace) -> RedshiftConfig:
     )
 
 
-def _report(destination: Path, summary: dict, cost_rows: list) -> None:
+def _report(destination: Path, summary: dict, billing_rows: list) -> None:
     print(f"Wrote {destination}")
     print(f"  {summary['month_count']} months: {', '.join(summary['months'])}")
     print(f"  {summary['total_mar']:,} total paid MAR")
+    if summary.get("non_paid_mar"):
+        print(f"  {summary['non_paid_mar']:,} non-paid MAR (initial syncs, trials, free re-syncs)")
     print(f"  {summary['latest_month_mar']:,} MAR in {summary['latest_month']} (latest)")
     print(f"  {summary['mean_monthly_mar']:,} mean monthly MAR")
 
@@ -366,17 +349,18 @@ def _report(destination: Path, summary: dict, cost_rows: list) -> None:
             share = mar / summary["total_mar"] * 100 if summary["total_mar"] else 0
             print(f"    {name}: {mar:,} ({share:.1f}%)")
 
-    billed = [r for r in cost_rows if r.get("cost_usd") is not None]
-    credits = [r for r in cost_rows if r.get("credits") is not None]
+    billed = [r for r in billing_rows if r["metric"] == "usage_cost_usd"]
+    credits = [r for r in billing_rows if r["metric"] == "credits_used"]
     if billed:
-        total = sum(float(r["cost_usd"]) for r in billed)
-        print(f"  reported spend: ${total:,.2f} across {len(billed)} destination-months")
+        total = sum(r["value"] for r in billed)
+        print(f"  Fivetran usage_cost: ${total:,.2f} across {len(billed)} destination-months")
     if credits:
-        print(f"  credit-billed account: {len(credits)} destination-months of credit usage")
-    if not cost_rows:
+        total = sum(r["value"] for r in credits)
+        print(f"  Fivetran credits_used: {total:,.0f} across {len(credits)} destination-months")
+    if not billing_rows:
         print(
-            "  note: no spend rows. Cost comparison will rely on the modelled per-MAR rate "
-            "rather than the customer's actual invoice.",
+            "  note: no Platform Connector billing rows. Record the customer's Fivetran "
+            "spend with fivetran_consumption.py spend if they share it.",
             file=sys.stderr,
         )
 

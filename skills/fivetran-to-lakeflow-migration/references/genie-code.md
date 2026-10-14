@@ -8,7 +8,7 @@ Genie Code migrations are organised into four phases. This skill covers the **Da
 
 | Genie Code phase | Skill stages | Gate | Artifact |
 |---|---|---|---|
-| **Assessment** | 1 Discover, 2 Measure, 2.5 Telemetry, 3 Map, 4 Compare | **GATE 1** | `inventory.json`, `mar.json`, `telemetry.json`, `plan.json`, `cost.json` |
+| **Assessment** | 1 Discover, 2 Measure, 3 Map, 4 Consumption | **GATE 1** | `inventory.json`, `mar.json`, `fivetran_spend.json`, `plan.json`, consumption export (with consent) |
 | **Conversion** | 5 Generate | **GATE 2** | `bundle/` |
 | **Data Migration** | 6 Deploy (parallel run) | — | live Lakeflow Connect pipelines |
 | **Reconciliation** | 6 Deploy steps 2–5 | — | customer row-count validation |
@@ -67,6 +67,8 @@ export FTLFC_OUT='…'
 
 All stage commands then use `${SCRIPTS}/fivetran_discover.py` and write artifacts under `${FTLFC_OUT}/`.
 
+The consumption export (stage 4, only after the customer agrees at Gate 1) can write straight to a Unity Catalog volume in Genie Code: pass `-o /Volumes/<catalog>/<schema>/<volume>` to `fivetran_consumption.py export`.
+
 ## Fivetran MCP alternative
 
 When the Fivetran MCP is configured (e.g. via Cursor `user-fivetran`), Stage 1 discovery can use MCP read tools instead of `fivetran_discover.py`:
@@ -91,6 +93,6 @@ Build `inventory.json` from MCP responses using the schema in `references/fivetr
 | Scripts not found | Re-run preflight `--export`; confirm skill uploaded to `.assistant/skills/` |
 | Fivetran 401 | Set API key/secret or authenticate Fivetran MCP |
 | `bundle validate` auth error | `databricks auth login --profile <profile>` |
-| MAR stage fails | Platform Connector missing — use `--print-sql` or invoice CSV |
-| Telemetry returns no data | No existing Lakeflow pipelines — rates still grounded from `list_prices` |
-| `system.billing` access denied | Workspace admin must grant `SELECT` on system tables |
+| MAR stage fails | Platform Connector missing — use `--print-sql` and `--csv`, or skip it and record the customer's spend with `fivetran_consumption.py spend` |
+| No `credits_used` table | Expected on dollar-billed plans; `fivetran_mar.py` skips it and keeps `usage_cost` |
+| Export copy to volume fails | The files stay in `${FTLFC_OUT}`; confirm the volume exists and the user has `WRITE VOLUME` on it |

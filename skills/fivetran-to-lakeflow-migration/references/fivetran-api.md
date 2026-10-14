@@ -258,7 +258,7 @@ Fivetran-proprietary and must be rebuilt; flag them as migration scope.
 
 ---
 
-## 4. MAR and cost: not available over REST
+## 4. MAR and billing: not available over REST
 
 **Verdict: no REST endpoint exposes MAR, usage, cost, or credits** [confirmed]. Nine candidate
 paths (`/v1/usage`, `/v1/billing`, `/v1/account/usage`, `/v1/consumption`, `/v1/credits`,
@@ -266,10 +266,11 @@ paths (`/v1/usage`, `/v1/billing`, `/v1/account/usage`, `/v1/consumption`, `/v1/
 against a control where `/v1/account/info` returns `401`. The API resource index lists no
 usage, billing, or MAR resource.
 
-So volume and cost must come from the **Fivetran Platform Connector** tables inside the
-customer's own destination warehouse. This is a hard dependency the skill must plan for:
-full topology from REST, but volume and cost only with warehouse access — and cost is usually
-the half the customer cares about.
+So volume and billed amounts must come from the **Fivetran Platform Connector** tables inside
+the customer's own destination warehouse. This is a hard dependency the skill must plan for:
+full topology from REST, but volume and billing only with warehouse access. The skill records
+these figures for the Databricks account team; it never prices them or compares them with
+Lakeflow Connect.
 
 ### Schema name
 
@@ -291,7 +292,8 @@ sync frequency is 24h, so figures can be a day stale.
 
 > **`free_type` is part of the primary key.** The same table on the same day appears as
 > multiple rows, one per billing category. Summing without `WHERE free_type = 'PAID'`
-> conflates billable and non-billable volume and inflates the estimate.
+> conflates billable and non-billable volume. The skill selects `free_type` and reports paid
+> and total MAR separately.
 
 Full `free_type` enum: `PAID`, `INITIAL_SYNC`, `CONNECTOR_TRIAL`, `ACCOUNT_TRIAL`,
 `TABLE_TRIAL`, `NON_CBP_ACCOUNT`, `FREE_RESYNC`, `PROMOTION`, `SYSTEM`, `PRIVATE_PREVIEW`,
@@ -303,108 +305,57 @@ Other tables:
 | Table | Contents |
 |---|---|
 | `USAGE_COST` | Monthly dollars per destination: `measured_month` (`YYYY-MM`), `group_id`, `amount` |
-| `CREDITS_USED` | Monthly credits, credit-billed plans only |
+| `CREDITS_USED` | Monthly credits, credit-billed plans only: `measured_month` (`YYYY-MM`), `group_id`, `credits_consumed`. The table does not exist on dollar-billed accounts |
 | `TRANSFORMATION_RUNS` | `model_runs` per job per day, with `free_type` and `project_type` |
 | `SOURCE_TABLE` | Metadata for **every table ever synced, including disabled ones** — historical scope the REST API cannot give you |
 | `TABLE_LINEAGE`, `COLUMN_LINEAGE` | Column-level lineage; the cheapest way to size downstream blast radius before cutover |
 | `CONNECTION`, `DESTINATION`, `CONNECTOR_TYPE` | Inventory cross-check |
 
-An account is billed on one basis or the other, so exactly one of `USAGE_COST` and
-`CREDITS_USED` will be populated. Check both. `connector_name`/`connector_id` are deprecated in
-favour of `connection_name`/`connection_id`. **`ACTIVE_VOLUME` does not exist** — the nearest
+An account is billed on one basis or the other, so usually only one of `USAGE_COST` and
+`CREDITS_USED` is populated. Query each on its own, so a missing `CREDITS_USED` does not fail
+the other. `connector_name`/`connector_id` are deprecated in favour of
+`connection_name`/`connection_id`; older installs still have only `connector_name`, so
+`fivetran_mar.py` retries with it. **`ACTIVE_VOLUME` does not exist** — the nearest
 thing is `fivetran_platform__usage_history`, a derived model from Fivetran's dbt package.
 
 ### Reference query
 
 ```sql
-SELECT connection_name, schema_name, table_name,
+SELECT destination_id, connection_name, schema_name, table_name, free_type,
        date_trunc('month', measured_date) AS measured_month,
        SUM(incremental_rows) AS mar
 FROM fivetran_metadata.incremental_mar
-WHERE free_type = 'PAID'
-  AND measured_date >= date_trunc('month', current_date - INTERVAL '6 months')
-GROUP BY 1, 2, 3, 4
+WHERE measured_date >= date_trunc('month', current_date - INTERVAL '6 months')
+GROUP BY 1, 2, 3, 4, 5, 6
 ORDER BY measured_month, mar DESC;
 ```
 
+`python3 fivetran_mar.py --print-sql` prints the exact queries, including `USAGE_COST` and
+`CREDITS_USED`.
+
 ### If the Platform Connector is unavailable
 
-All remaining options are manual: the Billing & Usage page in the Fivetran dashboard, the
-Pricing Estimator, or the customer's contract/invoice. None is automatable. Detect whether the
+All remaining options are manual: the Billing & Usage page in the Fivetran dashboard or the
+customer's contract/invoice. None is automatable; record what the customer shares with
+`fivetran_consumption.py spend`. Detect whether the
 customer already runs Fivetran's [Platform Connector dbt package](https://fivetran.com/docs/transformations/data-models/fivetran-platform-connector-data-model)
 (`fivetran_platform__usage_history`, `__mar_table_history`) — if so, the analysis is much easier.
 
 ---
 
-## 5. Pricing model
-
-Marked **[public]** from Fivetran's own pages, **[derived]** computed from their published
-figures, **[third-party]** where only non-Fivetran sources support it.
-
-### How MAR is counted [public]
+## 5. How MAR is counted
 
 MAR is the count of **distinct primary keys** synced per month, counted separately per account,
 destination, connection, and table. Fivetran generates a synthetic hashed key when no primary
 key exists.
 
 The defining property: **a row counts once per month regardless of how many times it changes.**
-Update the same row 30 times and it is 1 MAR. This makes MAR largely insensitive to sync
-frequency — which matters when comparing against Lakeflow Connect, where more frequent syncs
-*do* cost more compute.
+Update the same row 30 times and it is 1 MAR. So MAR divided by runs per month (the
+`num_rows` column in the consumption export) is a floor on the rows each run moves, not an
+average.
 
 Counted: inserts, updates, and deletes (deletes began counting 2026-01-01). Not counted:
 unchanged rows retrieved during re-syncs, and initial syncs.
-
-### Plans [public]
-
-Current lineup is **Free, Standard, Enterprise, Business Critical**. Starter and Private
-Deployment were discontinued 2025-03-01 [third-party for the date], though legacy accounts may
-remain on them.
-
-- **Free** — capped at 500K connection MAR/month. No REST API.
-- **Standard** — 15-min syncs, REST API, dbt Core, RBAC, SSH tunnels.
-- **Enterprise** — + 1-min syncs, enterprise DB connectors (Oracle, HVA), SCIM, hybrid deployment.
-- **Business Critical** — + CMEK, PCI DSS L1, private networking.
-
-### Rates
-
-**Standard ≈ $500 per million MAR at low volume [derived].** Fivetran publishes no rate card,
-but its pricing-page examples back one out consistently:
-
-| Example connector | Median MAR | Listed price | Implied $/M MAR |
-|---|---|---|---|
-| Facebook Ads | 34,479 | $17.23 | $499.7 |
-| Google Analytics 4 | 21,993 | $10.99 | $499.7 |
-| Marketo | 847,574 | $423.78 | $500.0 |
-| Google Ads | 88,240 | $44.12 | $500.0 |
-
-The curve is effectively flat below 1M MAR; the decline begins above it. Enterprise ≈ $667/M
-and Business Critical ≈ $1,067/M are **[third-party, unverified]** — treat as rough.
-
-Pricing moved to **per-connection cost curves** in 2026: each connection has its own declining
-rate. Accounts with many low-volume connections saw increases; consolidated high-volume ones
-saw decreases. There is also a **$5 base charge** per standard connection between 1 and 1M MAR.
-
-> **[unverified] The $5 base charge contradicts Fivetran's own examples.** The Facebook Ads
-> example is exactly 34,479 × $500/M with no $5 added — so either the $5 is a floor rather than
-> an addend, or the examples predate the 2026 change. This materially affects accounts with
-> many small connections. Confirm against the customer's actual invoice before quoting savings.
-
-**Transformations** [public] — the one published rate table. Only successful runs count.
-
-| Monthly model runs | Rate per run |
-|---|---|
-| 0 – 5,000 | $0.00 |
-| 5,001 – 30,000 | $0.01 |
-| 30,001 – 100,000 | $0.007 |
-| 100,000+ | $0.002 |
-
-**Annual discounts** [public] run 5% to ~22.6% on Standard by list price, though Fivetran's
-pricing blog cites "5% up to 36%" — the discrepancy is unresolved.
-
-**ELAs** [public] are fixed-price with unlimited consumption. **An ELA customer's MAR will not
-correlate with their spend**, which changes how you frame the comparison entirely. Detect this
-early by reconciling `incremental_mar` against `usage_cost`.
 
 ---
 
@@ -485,4 +436,4 @@ API cannot provide — plan for that dependency up front.
 - [Connector metadata](https://fivetran.com/docs/rest-api/api-reference/connector-metadata)
 - [Rate limiting](https://fivetran.com/docs/rest-api/getting-started/rate-limiting)
 - [Platform Connector table reference](https://fivetran.com/docs/logs/fivetran-platform/table-reference)
-- [Usage-based pricing](https://fivetran.com/docs/core-concepts/usage-based-pricing)
+- [Monthly Active Rows](https://fivetran.com/docs/core-concepts/usage-based-pricing)
