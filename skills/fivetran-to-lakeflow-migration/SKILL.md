@@ -39,16 +39,16 @@ and ends with customer-led reconciliation.
 | **Reconciliation** | 6 Deploy steps 2–5 (customer-owned) | — | row-count validation, customer pauses Fivetran |
 
 ```
-1.   Discover    ${SCRIPTS}/fivetran_discover.py     -> inventory.json   ┐
-2.   Measure     ${SCRIPTS}/fivetran_mar.py          -> mar.json         │ Assessment
-                 ${SCRIPTS}/fivetran_consumption.py  -> fivetran_spend.json (optional)
-3.   Map         ${SCRIPTS}/plan_migration.py        -> plan.json        │
-4.   Consumption ${SCRIPTS}/fivetran_consumption.py  -> Gate 1 summary   ┘
-                                                                        ▓▓ GATE 1: present & wait
-                 ${SCRIPTS}/fivetran_consumption.py  -> CSV export (only if the customer agrees)
-5.   Generate    ${SCRIPTS}/generate_bundle.py       -> bundle/           Conversion
-                                                                        ▓▓ GATE 2: present & wait
-6.   Deploy      databricks bundle                   -> live pipelines    Data Migration + Reconciliation
+1.   Discover    ${SCRIPTS}/fivetran_discover.py     -> inventory.json               ┐
+2.   Measure     ${SCRIPTS}/fivetran_mar.py          -> mar.json                     │ Assessment
+                 ${SCRIPTS}/fivetran_consumption.py  -> fivetran_spend.json          │
+3.   Map         ${SCRIPTS}/plan_migration.py        -> plan.json                    │
+4.   Consumption ${SCRIPTS}/fivetran_consumption.py  -> Gate 1 summary               ┘
+                                                                                     ▓▓ GATE 1: present & wait
+                 ${SCRIPTS}/fivetran_consumption.py  -> fivetran_consumption_<date>/  (only after consent)
+5.   Generate    ${SCRIPTS}/generate_bundle.py       -> bundle/                        Conversion
+                                                                                     ▓▓ GATE 2: present & wait
+6.   Deploy      databricks bundle                   -> live pipelines                 Data Migration + Reconciliation
 ```
 
 Stages 1–5 are read-only with respect to both Fivetran and Databricks until

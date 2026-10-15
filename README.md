@@ -35,27 +35,29 @@ Built for **Claude Code** (plugin) and **Genie Code** (agentic orchestration).
 ## Overview
 
 The skill runs a six-stage pipeline. Each stage reads the previous stage's
-artifact and writes its own. All artifacts are JSON files on disk — human-readable,
-diffable, and versionable. Stages 1 through 5 are **read-only** with respect to
-both Fivetran and Databricks, apart from copying the consumption export to a
-Unity Catalog volume when the customer asks for that at Gate 1.
+artifact and writes its own. Artifacts are JSON files on disk — human-readable,
+diffable, and versionable — except the optional consumption export, which is a
+folder of CSV files. Stages 1 through 5 are **read-only** with respect to both
+Fivetran and Databricks. The one exception is the consumption export: written
+only if the customer agrees at Gate 1, to the local output folder by default,
+and copied to a Unity Catalog volume only when they name one.
 
 ```
-1.   Discover    ──> inventory.json       (Fivetran API)
-2.   Measure     ──> mar.json             (Platform Connector tables)
-                 ──> fivetran_spend.json  (spend the customer shares, optional)
-3.   Map         ──> plan.json            (connector catalog)
-4.   Consumption ──> Gate 1 summary       (recorded Fivetran consumption)
-                     ▓▓ GATE 1 ▓▓         human review
-                 ──> CSV export           (only if the customer agrees)
-5.   Generate    ──> bundle/              (Asset Bundle YAML)
-                     ▓▓ GATE 2 ▓▓         human review
-6.   Deploy      ──> live pipelines       (databricks bundle deploy)
+1.   Discover    ──> inventory.json                (Fivetran API)
+2.   Measure     ──> mar.json                      (Platform Connector MAR and billing)
+                 ──> fivetran_spend.json           (customer-reported spend, optional)
+3.   Map         ──> plan.json                     (connector catalog)
+4.   Consumption ──> Gate 1 summary                (Platform Connector MAR/billing + reported spend)
+                     ▓▓ GATE 1 ▓▓                  human review + export consent
+                 ──> fivetran_consumption_<date>/  (CSV export, only after consent)
+5.   Generate    ──> bundle/                       (Asset Bundle YAML)
+                     ▓▓ GATE 2 ▓▓                  human review
+6.   Deploy      ──> live pipelines                (databricks bundle deploy)
 ```
 
 Two mandatory **review gates** enforce human approval. The agent stops after
-assessment (scope + export consent) and again after conversion (generated bundle). Neither
-gate can be skipped.
+assessment (scope + Fivetran consumption) and again after conversion (generated
+bundle). Neither gate can be skipped.
 
 ---
 
@@ -120,7 +122,8 @@ The skill only issues GET requests and never modifies Fivetran state.
 
 #### 4. (Optional) Configure Databricks CLI
 
-Required for stages 2, 2.5, and 6. If the CLI is already configured, no extra
+Required for stage 2 (Databricks path), the stage 4 export's
+cloud/region lookup and volume copy, and stage 6. If the CLI is already configured, no extra
 setup is needed. Otherwise:
 
 ```bash
