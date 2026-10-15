@@ -3,11 +3,12 @@ name: fivetran-to-lakeflow-migration
 description: |
   Migrate ingestion pipelines from Fivetran to Databricks Lakeflow Connect within
   the Genie Code migration framework (Assessment, Conversion, Data Migration,
-  Reconciliation). Discovers the Fivetran estate, collects MAR and spend, maps
-  each connector to Lakeflow Connect, compares cost, and generates plus deploys
-  replacement pipelines as a Databricks Asset Bundle. Use when a customer asks
-  about replacing Fivetran, consolidating ingestion onto Databricks, Fivetran
-  cost reduction, Lakeflow Connect migration, or Genie Code data migration.
+  Reconciliation). Discovers the Fivetran estate, records Fivetran MAR, billing,
+  and spend for the Databricks account team, maps each connector to Lakeflow
+  Connect, and generates plus deploys replacement pipelines as a Databricks
+  Asset Bundle. Use when a customer asks about replacing Fivetran, consolidating
+  ingestion onto Databricks, Lakeflow Connect migration, or Genie Code data
+  migration.
 user-invocable: true
 argument-hint: "[--group <fivetran-group-id>] [--dest-catalog <catalog>] [--profile <databricks-profile>]"
 allowed-tools: Bash, Read, Write, Grep, Glob
@@ -32,25 +33,28 @@ and ends with customer-led reconciliation.
 
 | Genie Code phase | Stages | Gate | Output |
 |---|---|---|---|
-| **Assessment** | 1 Discover, 2 Measure, 2.5 Telemetry, 3 Map, 4 Compare | **GATE 1** | `inventory.json`, `mar.json`, `telemetry.json`, `plan.json`, `cost.json` |
+| **Assessment** | 1 Discover, 2 Measure, 3 Map, 4 Consumption | **GATE 1** | `inventory.json`, `mar.json`, `fivetran_spend.json`, `plan.json`, consumption export (with consent) |
 | **Conversion** | 5 Generate | **GATE 2** | `bundle/` |
 | **Data Migration** | 6 Deploy (parallel run) | — | live Lakeflow Connect pipelines |
 | **Reconciliation** | 6 Deploy steps 2–5 (customer-owned) | — | row-count validation, customer pauses Fivetran |
 
 ```
-1.   Discover    ${SCRIPTS}/fivetran_discover.py     -> inventory.json   ┐
-2.   Measure     ${SCRIPTS}/fivetran_mar.py          -> mar.json         │ Assessment
-2.5  Telemetry   ${SCRIPTS}/databricks_telemetry.py  -> telemetry.json   │
-3.   Map         ${SCRIPTS}/plan_migration.py        -> plan.json        │
-4.   Compare     ${SCRIPTS}/compare_cost.py          -> cost.json        ┘
-                                                                        ▓▓ GATE 1: present & wait
-5.   Generate    ${SCRIPTS}/generate_bundle.py       -> bundle/           Conversion
-                                                                        ▓▓ GATE 2: present & wait
-6.   Deploy      databricks bundle                   -> live pipelines    Data Migration + Reconciliation
+1.   Discover    ${SCRIPTS}/fivetran_discover.py     -> inventory.json               ┐
+2.   Measure     ${SCRIPTS}/fivetran_mar.py          -> mar.json                     │ Assessment
+                 ${SCRIPTS}/fivetran_consumption.py  -> fivetran_spend.json          │
+3.   Map         ${SCRIPTS}/plan_migration.py        -> plan.json                    │
+4.   Consumption ${SCRIPTS}/fivetran_consumption.py  -> Gate 1 summary               ┘
+                                                                                     ▓▓ GATE 1: present & wait
+                 ${SCRIPTS}/fivetran_consumption.py  -> fivetran_consumption_<date>/  (only after consent)
+5.   Generate    ${SCRIPTS}/generate_bundle.py       -> bundle/                        Conversion
+                                                                                     ▓▓ GATE 2: present & wait
+6.   Deploy      databricks bundle                   -> live pipelines                 Data Migration + Reconciliation
 ```
 
 Stages 1–5 are read-only with respect to both Fivetran and Databricks until
-stage 6 runs deliberately.
+stage 6 runs deliberately. The one exception is the consumption export, which
+copies files to a Unity Catalog volume only when the customer asks for that at
+Gate 1.
 
 ## Review gates
 
@@ -74,19 +78,23 @@ Present the following to the customer before any bundle is generated:
    primary key. Present Beta / Public Preview notes as something to confirm
    in the target workspace, never as a finding that the connector is off:
    the planner cannot see the workspace.
-5. **Cost comparison** — Fivetran MAR spend vs modelled Lakeflow Connect
-   scenarios from `cost.json`, with the assumptions and caveats printed by
-   stage 4. If stage 2.5 ran, note which rates are grounded from system
-   tables vs still using defaults. Never present the modelled number without
-   its assumptions.
+5. **Fivetran consumption and spend** — the `fivetran_spend` and
+   `fivetran_consumption` sections printed by stage 4. These are recorded
+   figures, not estimates; if both are empty, say no Fivetran consumption or
+   spend was recorded.
 6. **Recommendation** — which connections to migrate first (lowest effort,
    highest MAR), which to defer, and which need a different architecture.
 
-**Wait here.** The customer may want to:
-- Narrow scope (exclude blocked or high-effort connections)
-- Reuse Unity Catalog connections that already exist (see stage 3)
-- Provide a measured cost from a pilot instead of the modelled estimate
-- Ask questions about specific connectors or source prerequisites
+**Wait here** and ask two questions:
+
+1. Which connections to migrate: all migratable ones, a subset (record the
+   connection ids), or stop. The customer may want to narrow scope, reuse
+   Unity Catalog connections that already exist (see stage 3), or ask about
+   specific connectors or source prerequisites.
+2. Whether to save the Fivetran consumption export as CSV files for their
+   Databricks account team: in `${FTLFC_OUT}` only, also copied to a Unity
+   Catalog volume they name, or not at all. Run the export (stage 4) only after
+   a yes, and give them the folder path.
 
 Do not proceed to stage 5 until the customer explicitly approves the
 migration scope.
@@ -136,11 +144,12 @@ All commands below assume `${SCRIPTS}` and `${FTLFC_OUT}` are exported.
 
 Three rules matter more than speed here.
 
-**Never present a modelled cost as a quote.** Databricks publishes no
-DBU-per-row coefficient for managed ingestion, so the Lakeflow Connect side of
-any comparison is a scenario built on stated assumptions until a pilot has run.
-Stage 4 prints its assumptions and caveats every time; reproduce them alongside
-any number you pass on.
+**The skill does not estimate or compare cost.** It records Fivetran
+consumption (Platform Connector MAR and billing, and any spend the customer
+shares) and reports it as given. It never prices Lakeflow Connect, quotes
+Fivetran rates, compares the two, or states a saving. If asked, say the
+Databricks account team models cost from the consumption export. Write that
+export only after the customer agrees to it at Gate 1.
 
 **Never delete or disable a Fivetran connection.** The migration is additive
 until the customer has reconciled row counts themselves. Pause, never delete,
@@ -183,6 +192,12 @@ has **no endpoint** for MAR, usage, cost, or credits — this was verified by
 probing nine candidate paths, all returning 404. The only programmatic source is
 the Fivetran **Platform Connector**, which writes usage and billing tables into
 the customer's destination warehouse.
+
+`fivetran_mar.py` loads six months of `incremental_mar` per table (every
+`free_type`, so paid and total MAR stay separate) plus Fivetran's billed
+amounts from `usage_cost` and, on credit-based plans, `credits_used`. A billing
+table the account does not have is skipped, not an error. Older installs name
+the MAR column `connector_name`; the script retries with it.
 
 Determine which path applies, then run the corresponding command:
 
@@ -254,45 +269,25 @@ python3 ${SCRIPTS}/fivetran_mar.py --csv mar_export.csv -o ${FTLFC_OUT}/mar.json
 
 ### Path C: No Platform Connector installed
 
-If the Platform Connector is not installed at all, there is no automated path.
-Ask the customer for their MAR and spend from the Fivetran dashboard
-(Settings → Usage) or their invoice/contract. Pass the numbers to the cost
-model manually. A known annual spend number beats any model estimate.
+If the Platform Connector is not installed at all, there is no automated path
+to MAR or billing. Skip `fivetran_mar.py`; the spend the customer shares (below)
+is the only cost record, and the consumption export says so.
 
-## Stage 2.5: Telemetry (Assessment — optional but recommended)
+### Fivetran spend (optional)
 
-Queries three Databricks system tables to replace hardcoded cost-model
-assumptions with the customer's actual rates and any existing Lakeflow Connect
-consumption data:
-
-- `system.billing.list_prices` — actual DBU rates for serverless and gateway SKUs
-- `system.billing.usage` + `system.lakeflow.pipelines` — real DBU consumption for
-  any existing ingestion pipelines or gateways
-- Run-duration estimation from billing segments
+Once, during this stage, ask whether the customer will share their current
+Fivetran spend: the monthly amount in USD, the month it covers, whether it is
+an `invoice` (a billed total), `contract` (the committed amount), or `estimate`
+(their own figure), and monthly MAR if they know it. Never require it. Record
+only what they say; never look up, derive, or compare prices.
 
 ```bash
-python3 ${SCRIPTS}/databricks_telemetry.py --warehouse-id <id> \
-  --profile <profile> -o ${FTLFC_OUT}/telemetry.json
+python3 ${SCRIPTS}/fivetran_consumption.py spend --month 2026-09 \
+  --monthly-usd 12000 --basis invoice --monthly-mar 25000000 \
+  --note "Enterprise plan, renews 2027-03" -o ${FTLFC_OUT}/fivetran_spend.json
 ```
 
-If no SQL warehouse is available, print the queries for manual execution:
-
-```bash
-python3 ${SCRIPTS}/databricks_telemetry.py --print-sql
-```
-
-The output `telemetry.json` contains an enriched rate card. Stage 4 consumes it
-automatically via `--telemetry`:
-
-```bash
-python3 ${SCRIPTS}/compare_cost.py -p ${FTLFC_OUT}/plan.json \
-  --mar ${FTLFC_OUT}/mar.json --telemetry ${FTLFC_OUT}/telemetry.json \
-  -o ${FTLFC_OUT}/cost.json
-```
-
-When the customer has no existing Lakeflow pipelines, the telemetry stage still
-grounds the DBU rates from `list_prices` and identifies the remaining defaults
-clearly in the enrichment log.
+Recording the same month again replaces the earlier entry.
 
 ## Stage 3: Map (Conversion)
 
@@ -304,7 +299,7 @@ python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json -c <dest_cat
 **SQL Server architecture.** By default the planner targets **integrated CDC**:
 one serverless pipeline with `connector_type: CDC` that references the UC
 connection directly and stages through a Unity Catalog volume, with no gateway.
-This removes the continuously-billed classic-compute gateway that the standard
+This removes the continuously running classic-compute gateway that the standard
 architecture requires. Pass `--sqlserver-arch gateway` to generate the older
 gateway-based pair instead (for example, if the workspace does not yet have the
 integrated CDC connector enabled). Integrated CDC must be turned on for the
@@ -370,8 +365,8 @@ mean:
   carry over. Databricks-side network access must be designed separately.
 - **No managed connector.** Check the `alternative` field. Object storage goes
   to Auto Loader, message buses to a streaming source, warehouses to
-  federation. These are often cheaper than the Fivetran connector they replace,
-  so a blocker is not necessarily bad news.
+  federation. A blocker means a different architecture, not necessarily that
+  the source cannot move.
 
 Two connectors are never faithful one-to-one migrations, and both need saying
 out loud early:
@@ -383,31 +378,52 @@ out loud early:
   Lakeflow Connect ingests raw events. Downstream models built on Fivetran's
   aggregates need rewriting.
 
-## Stage 4: Compare
+## Stage 4: Consumption (Assessment)
+
+Print the Gate 1 consumption and spend sections. This writes nothing:
 
 ```bash
-python3 ${SCRIPTS}/compare_cost.py -p ${FTLFC_OUT}/plan.json \
-  --mar ${FTLFC_OUT}/mar.json --telemetry ${FTLFC_OUT}/telemetry.json \
-  -o ${FTLFC_OUT}/cost.json
+python3 ${SCRIPTS}/fivetran_consumption.py summary -p ${FTLFC_OUT}/plan.json \
+  --mar ${FTLFC_OUT}/mar.json --spend ${FTLFC_OUT}/fivetran_spend.json
 ```
 
-If stage 2.5 was skipped, omit `--telemetry` and the model uses defaults.
+Omit `--mar` without the Platform Connector and `--spend` if no spend was
+recorded. `fivetran_spend` is the customer's figure as recorded;
+`fivetran_consumption` is the latest full month's paid MAR across the planned
+connections and Fivetran's billed `usage_cost` / `credits_used` for the latest
+full month.
 
-Read the assumptions block it prints. The two that dominate the result:
+**Export for the account team.** Only after the customer says yes at Gate 1:
 
-- **Gateways run continuously.** Database CDC sources needing a gateway bill
-  24/7 on classic compute whether or not data is flowing, plus cloud
-  infrastructure that never appears in `system.billing.usage`. This sets a floor
-  independent of volume, and consolidating database sources behind fewer
-  gateways is usually the single largest saving available.
-- **Blocked connections keep costing.** Their Fivetran spend does not go away,
-  and Fivetran's platform fees and tier minimums rarely scale down in
-  proportion to removed MAR. A partial migration saves less than the MAR
-  reduction implies.
+```bash
+python3 ${SCRIPTS}/fivetran_consumption.py export -p ${FTLFC_OUT}/plan.json \
+  --mar ${FTLFC_OUT}/mar.json --spend ${FTLFC_OUT}/fivetran_spend.json \
+  --warehouse-id <id> --profile <profile> -o ${FTLFC_OUT} \
+  [--volume <catalog>.<schema>.<volume>]
+```
 
-To replace the model with a measurement, migrate one representative connection,
-let it run three to seven days, then query `system.billing.usage` and pass the
-rows with `--measured`. Do this before any number reaches a customer deck.
+It writes `fivetran_consumption_<date>/` with:
+
+- `connections.csv` — one row per planned connection in the input shape of the
+  Lakeflow Connect cost estimator: `source_type`, `num_rows` per run,
+  `num_flows` (tables), `cloud`, `region`, plus `runs_per_month` and paid and
+  total MAR. `num_rows` is the latest full month's paid MAR divided by runs per
+  month (`43200 / sync_minutes`). MAR counts each key once a month, so it is a
+  floor. It is empty for continuous schedules and without MAR.
+- `fivetran_billing.csv` — Platform Connector `usage_cost` / `credits_used` for
+  the destinations in the plan, plus any spend the customer reported.
+- `mar_by_table.csv` — monthly MAR per table and `free_type`, filtered to the
+  destinations in the plan.
+- `README.txt` — what each file holds.
+
+`cloud` and `region` come from `current_metastore()` on `--warehouse-id`; pass
+`--cloud` and `--region` instead when there is no warehouse. `--volume` copies
+the folder to an existing volume the customer can write to (`databricks fs cp`);
+in Genie Code, `-o /Volumes/<catalog>/<schema>/<volume>` writes there directly.
+Tell the customer the folder path, that they can download the files from Catalog
+Explorer and send them to their Databricks account team, and that the files hold
+connection, schema, and table names and row counts but no credentials or row
+data.
 
 ## Stage 5: Generate (Conversion)
 
@@ -471,19 +487,19 @@ python3 ${SCRIPTS}/fivetran_discover.py -g <group_id> \
   -o ${FTLFC_OUT}/inventory.json
 python3 ${SCRIPTS}/fivetran_mar.py --warehouse-id <id> --profile <profile> \
   -o ${FTLFC_OUT}/mar.json
-python3 ${SCRIPTS}/databricks_telemetry.py --warehouse-id <id> --profile <profile> \
-  -o ${FTLFC_OUT}/telemetry.json
 python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json \
   -c main_prod --mar ${FTLFC_OUT}/mar.json -o ${FTLFC_OUT}/plan.json
-python3 ${SCRIPTS}/compare_cost.py -p ${FTLFC_OUT}/plan.json \
-  --mar ${FTLFC_OUT}/mar.json --telemetry ${FTLFC_OUT}/telemetry.json \
-  -o ${FTLFC_OUT}/cost.json
+python3 ${SCRIPTS}/fivetran_consumption.py summary -p ${FTLFC_OUT}/plan.json \
+  --mar ${FTLFC_OUT}/mar.json
+# Gate 1. Only if the customer agrees to the export:
+python3 ${SCRIPTS}/fivetran_consumption.py export -p ${FTLFC_OUT}/plan.json \
+  --mar ${FTLFC_OUT}/mar.json --warehouse-id <id> --profile <profile> -o ${FTLFC_OUT}
 python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
   -o ${FTLFC_OUT}/bundle --name acme-lfc \
   --host https://<workspace>.cloud.databricks.com
 ```
 
-Review `plan.json` blockers and `cost.json` assumptions before generating the bundle.
+Review `plan.json` blockers and warnings before generating the bundle.
 
 ### Example: Offline from sample inventory (no Fivetran credentials)
 
@@ -491,8 +507,10 @@ Review `plan.json` blockers and `cost.json` assumptions before generating the bu
 python3 ${SCRIPTS}/plan_migration.py \
   -i ${SCRIPTS}/../fixtures/inventory.sample.json -c main_prod \
   -o ${FTLFC_OUT}/plan.json
-python3 ${SCRIPTS}/compare_cost.py -p ${FTLFC_OUT}/plan.json \
-  --fivetran-annual-cost 120000 -o ${FTLFC_OUT}/cost.json
+python3 ${SCRIPTS}/fivetran_consumption.py spend --month 2026-09 \
+  --monthly-usd 10000 --basis contract -o ${FTLFC_OUT}/fivetran_spend.json
+python3 ${SCRIPTS}/fivetran_consumption.py summary -p ${FTLFC_OUT}/plan.json \
+  --spend ${FTLFC_OUT}/fivetran_spend.json
 python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
   -o ${FTLFC_OUT}/bundle --name sample-lfc
 ```
@@ -512,14 +530,15 @@ Load these only when you need the detail; they are long.
 - [`references/genie-code.md`](references/genie-code.md) — Genie Code publish,
   preflight, MCP discovery path, orchestration with other migration skills
 - [`references/fivetran-api.md`](references/fivetran-api.md) — endpoints,
-  response shapes, pagination, rate limits, and what MAR is *not* available from
+  response shapes, pagination, rate limits, Platform Connector MAR and billing
+  tables, and how MAR is counted
 - [`references/lakeflow-connect-api.md`](references/lakeflow-connect-api.md) —
   `ingestion_definition` and `gateway_definition` schemas, `table_configuration`
   fields, connection creation paths
 - [`references/connector-coverage.md`](references/connector-coverage.md) —
   Fivetran connector to Lakeflow Connect mapping with release states
-- [`references/bundles-and-cost.md`](references/bundles-and-cost.md) — bundle
-  patterns, billing system tables, and the cost model's derivation
+- [`references/bundles.md`](references/bundles.md) — bundle patterns,
+  per-environment parameters, and the recreate trap
 
 ## Gotchas worth remembering
 

@@ -21,8 +21,11 @@ from ftlfc.mar import (
     _normalise_month,
     _rows_from_statement,
     aggregate,
+    build_billing_queries,
     build_mar_query,
+    latest_full_month,
     load_csv,
+    load_platform_connector,
     run_bigquery_query,
     run_redshift_query,
     run_snowflake_query,
@@ -30,10 +33,13 @@ from ftlfc.mar import (
 
 
 class TestQuery:
-    def test_filters_to_paid_only(self) -> None:
-        # free_type is part of the primary key, so omitting this filter double
-        # counts non-billable volume and inflates the savings estimate.
-        assert "free_type = 'PAID'" in build_mar_query("fivetran_metadata")
+    def test_keeps_free_type_and_destination(self) -> None:
+        # free_type is part of the primary key; grouping by it lets paid and
+        # total MAR be reported separately instead of conflated.
+        sql = build_mar_query("fivetran_metadata")
+        assert "free_type" in sql.split("FROM")[0]
+        assert "destination_id" in sql.split("FROM")[0]
+        assert "free_type =" not in sql
 
     def test_targets_the_requested_schema(self) -> None:
         assert "fivetran_log.incremental_mar" in build_mar_query("fivetran_log")
@@ -42,6 +48,96 @@ class TestQuery:
         recent = build_mar_query("fivetran_metadata", months=1)
         older = build_mar_query("fivetran_metadata", months=12)
         assert recent != older
+
+    def test_older_installs_use_connector_name(self) -> None:
+        sql = build_mar_query("fivetran_log", name_column="connector_name")
+        assert "connector_name                      AS connection_name" in sql
+        with pytest.raises(MarError):
+            build_mar_query("fivetran_log", name_column="1; DROP TABLE x")
+
+    @pytest.mark.parametrize(
+        "schema", ["x; DROP TABLE y", "a.b --", "a'b", "a /* c */", "a b", ""]
+    )
+    def test_rejects_unsafe_schema_names(self, schema: str) -> None:
+        with pytest.raises(MarError):
+            build_mar_query(schema)
+        with pytest.raises(MarError):
+            build_billing_queries(schema)
+
+    def test_accepts_qualified_and_backticked_names(self) -> None:
+        assert "main.fivetran_metadata.incremental_mar" in build_mar_query(
+            "main.fivetran_metadata"
+        )
+        assert "`my--proj.fivetran_log`.usage_cost" in build_billing_queries(
+            "`my--proj.fivetran_log`"
+        )["usage_cost_usd"]
+
+    def test_billing_queries_read_each_table_separately(self) -> None:
+        queries = build_billing_queries("fivetran_metadata")
+        assert set(queries) == {"usage_cost_usd", "credits_used"}
+        assert "usage_cost" in queries["usage_cost_usd"]
+        assert "credits_used" not in queries["usage_cost_usd"]
+        assert "credits_consumed AS value" in queries["credits_used"]
+        assert all("UNION" not in sql for sql in queries.values())
+
+
+_MAR_ROW = {
+    "destination_id": "grp",
+    "connection_name": "erp",
+    "schema_name": "dbo",
+    "table_name": "orders",
+    "free_type": "PAID",
+    "measured_month": "2026-08-01",
+    "mar": "100",
+}
+
+
+class TestLoadPlatformConnector:
+
+    def test_skips_a_missing_credits_used_table(self) -> None:
+        def run(sql: str) -> list[dict]:
+            if "credits_used" in sql:
+                raise MarError("TABLE_OR_VIEW_NOT_FOUND credits_used")
+            if "usage_cost" in sql:
+                return [
+                    {
+                        "group_id": "grp",
+                        "measured_month": "2026-08",
+                        "metric": "usage_cost_usd",
+                        "value": "4200.00",
+                    }
+                ]
+            return [_MAR_ROW]
+
+        records, billing = load_platform_connector(run, "pc")
+        assert records[0].destination_id == "grp"
+        assert billing == [
+            {"group_id": "grp", "measured_month": "2026-08", "metric": "usage_cost_usd",
+             "value": 4200.0}
+        ]
+
+    def test_retries_with_connector_name(self) -> None:
+        seen: list[str] = []
+
+        def run(sql: str) -> list[dict]:
+            seen.append(sql)
+            if "incremental_mar" in sql and "connector_name" not in sql:
+                raise MarError("UNRESOLVED_COLUMN connection_name")
+            if "incremental_mar" in sql:
+                return [_MAR_ROW]
+            return []
+
+        records, billing = load_platform_connector(run, "pc")
+        assert len(records) == 1
+        assert billing == []
+        assert sum("incremental_mar" in s for s in seen) == 2
+
+    def test_raises_the_first_error_when_mar_is_unreadable(self) -> None:
+        def run(sql: str) -> list[dict]:
+            raise MarError(f"failed: {'connector' if 'connector_name' in sql else 'connection'}")
+
+        with pytest.raises(MarError, match="failed: connection"):
+            load_platform_connector(run, "pc")
 
 
 class TestNormaliseMonth:
@@ -95,6 +191,23 @@ class TestLoadCsv:
             "pg_prod,public,orders,2026-07-01,900.0\n"
         )
         assert load_csv(io.StringIO(csv_text))[0].mar == 900
+
+    def test_reads_optional_destination_and_free_type(self) -> None:
+        csv_text = (
+            "destination_id,connection_name,schema_name,table_name,free_type,measured_month,mar\n"
+            "grp,pg_prod,public,orders,INITIAL_SYNC,2026-07-01,900\n"
+        )
+        record = load_csv(io.StringIO(csv_text))[0]
+        assert record.destination_id == "grp"
+        assert record.free_type == "INITIAL_SYNC"
+        assert not record.paid
+
+    def test_older_exports_without_free_type_count_as_paid(self) -> None:
+        csv_text = (
+            "connection_name,schema_name,table_name,measured_month,mar\n"
+            "pg_prod,public,orders,2026-07-01,900\n"
+        )
+        assert load_csv(io.StringIO(csv_text))[0].paid
 
     def test_names_the_missing_columns(self) -> None:
         csv_text = "connection_name,mar\nfoo,1\n"
@@ -173,6 +286,26 @@ class TestAggregate:
 
     def test_empty_input_is_not_an_error(self) -> None:
         assert aggregate([])["total_mar"] == 0
+
+    def test_counts_paid_mar_only(self) -> None:
+        summary = aggregate(
+            [
+                MarRecord("pg", "public", "orders", "2026-07", 300),
+                MarRecord("pg", "public", "orders", "2026-07", 5000, "grp", "INITIAL_SYNC"),
+            ]
+        )
+        assert summary["total_mar"] == 300
+        assert summary["non_paid_mar"] == 5000
+        assert summary["by_connection"] == {"pg": 300}
+
+
+class TestLatestFullMonth:
+    def test_skips_the_current_partial_month(self) -> None:
+        months = ["2026-08", "2026-09", "2026-10"]
+        assert latest_full_month(months, today=dt.date(2026, 10, 14)) == "2026-09"
+
+    def test_none_when_only_the_current_month(self) -> None:
+        assert latest_full_month(["2026-10"], today=dt.date(2026, 10, 14)) is None
 
 
 class TestSnowflakeConfig:

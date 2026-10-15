@@ -1,8 +1,8 @@
-"""Fivetran MAR and cost data from the Platform Connector.
+"""Fivetran MAR and billing data from the Platform Connector.
 
-No Fivetran REST endpoint exposes MAR, usage, cost, or credits. Volume and spend
-have to come from the Fivetran Platform Connector tables, which live in the
-customer's own destination warehouse -- which is often not Databricks.
+No Fivetran REST endpoint exposes MAR, usage, cost, or credits. Volume and billed
+amounts have to come from the Fivetran Platform Connector tables, which live in
+the customer's own destination warehouse -- which is often not Databricks.
 
 So this module supports six paths, in decreasing order of convenience:
 
@@ -13,8 +13,9 @@ So this module supports six paths, in decreasing order of convenience:
 5. ``--csv`` ingests an export the customer ran themselves, from any warehouse.
 6. ``--print-sql`` emits the query to hand to whoever does have access.
 
-Everything downstream consumes the same normalised record shape, so the cost
-model does not care which path produced it.
+Everything downstream consumes the same normalised record shape, so the plan
+and the consumption export do not care which path produced it. The skill
+records these figures as given; it never prices them.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ import datetime as dt
 import io
 import json
 import logging
+import re
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,39 +39,55 @@ log = logging.getLogger(__name__)
 PLATFORM_SCHEMAS = ("fivetran_metadata", "fivetran_log")
 
 # free_type is part of incremental_mar's primary key, so the same table on the
-# same day appears once per billing category. Summing without this filter
-# conflates billable and non-billable volume and inflates the estimate.
+# same day appears once per billing category. The query keeps free_type so that
+# paid and total volume can be reported separately; anything that sums MAR
+# without filtering on it conflates billable and non-billable volume.
 PAID = "PAID"
+
+# Older Platform Connector installs name the column connector_name.
+CONNECTION_NAME_COLUMNS = ("connection_name", "connector_name")
 
 MAR_QUERY = """
 SELECT
-    connection_name,
+    destination_id,
+    {name_column}                      AS connection_name,
     schema_name,
     table_name,
+    free_type,
     date_trunc('month', measured_date) AS measured_month,
     SUM(incremental_rows)              AS mar
 FROM {schema}.incremental_mar
-WHERE free_type = '{paid}'
-  AND measured_date >= '{since}'
-GROUP BY connection_name, schema_name, table_name, date_trunc('month', measured_date)
+WHERE measured_date >= '{since}'
+GROUP BY destination_id, {name_column}, schema_name, table_name, free_type,
+    date_trunc('month', measured_date)
 ORDER BY measured_month, mar DESC
 """.strip()
 
-# An account is billed on dollars or credits, never both, so exactly one of
-# these returns rows. Reconciling spend against MAR also detects an ELA, where
-# the two are uncorrelated and any per-MAR savings claim is meaningless.
-COST_QUERY = """
-SELECT measured_month, group_id, amount AS cost_usd, NULL AS credits
+# An account is billed on dollars or credits, so usually only one of these has
+# rows, and credits_used exists only on credit-based plans. Each runs on its own
+# so that a missing table skips that metric instead of failing the other.
+BILLING_QUERIES = {
+    "usage_cost_usd": """
+SELECT group_id, measured_month, 'usage_cost_usd' AS metric, amount AS value
 FROM {schema}.usage_cost
 WHERE measured_month >= '{since_month}'
-UNION ALL
-SELECT measured_month, group_id, NULL AS cost_usd, credits_consumed AS credits
+ORDER BY measured_month, group_id
+""".strip(),
+    "credits_used": """
+SELECT group_id, measured_month, 'credits_used' AS metric, credits_consumed AS value
 FROM {schema}.credits_used
 WHERE measured_month >= '{since_month}'
-ORDER BY measured_month
-""".strip()
+ORDER BY measured_month, group_id
+""".strip(),
+}
 
 REQUIRED_MAR_FIELDS = ("connection_name", "schema_name", "table_name", "measured_month", "mar")
+OPTIONAL_MAR_FIELDS = ("destination_id", "free_type")
+
+# Identifiers are formatted into SQL because they cannot be bound as parameters.
+# They come from the operator's own flags, but reject anything that could end a
+# statement or open a comment rather than trust them.
+_UNSAFE_IDENTIFIER = re.compile(r"[;'\"\s\\]|/\*")
 
 
 class MarError(RuntimeError):
@@ -83,10 +101,16 @@ class MarRecord:
     table_name: str
     measured_month: str  # YYYY-MM
     mar: int
+    destination_id: str = ""
+    free_type: str = PAID
 
     @property
     def qualified_table(self) -> str:
         return f"{self.schema_name}.{self.table_name}"
+
+    @property
+    def paid(self) -> bool:
+        return self.free_type.upper() == PAID
 
 
 def months_ago(months: int) -> dt.date:
@@ -95,12 +119,79 @@ def months_ago(months: int) -> dt.date:
     return dt.date(year, month + 1, 1)
 
 
-def build_mar_query(schema: str, months: int = 6) -> str:
-    return MAR_QUERY.format(schema=schema, paid=PAID, since=months_ago(months).isoformat())
+def check_identifier(name: str) -> str:
+    """Return ``name`` unchanged, or raise if it is not a plain qualified identifier."""
+    # BigQuery project ids inside backticks may contain "--"; elsewhere it opens a comment.
+    if not name or _UNSAFE_IDENTIFIER.search(name) or ("--" in name and "`" not in name):
+        raise MarError(f"Refusing to use {name!r} as a schema name in SQL")
+    return name
 
 
-def build_cost_query(schema: str, months: int = 6) -> str:
-    return COST_QUERY.format(schema=schema, since_month=months_ago(months).strftime("%Y-%m"))
+def build_mar_query(
+    schema: str, months: int = 6, name_column: str = CONNECTION_NAME_COLUMNS[0]
+) -> str:
+    if name_column not in CONNECTION_NAME_COLUMNS:
+        raise MarError(f"Unknown connection name column {name_column!r}")
+    return MAR_QUERY.format(
+        schema=check_identifier(schema),
+        name_column=name_column,
+        since=months_ago(months).isoformat(),
+    )
+
+
+def build_billing_queries(schema: str, months: int = 6) -> dict[str, str]:
+    since_month = months_ago(months).strftime("%Y-%m")
+    return {
+        metric: sql.format(schema=check_identifier(schema), since_month=since_month)
+        for metric, sql in BILLING_QUERIES.items()
+    }
+
+
+def load_platform_connector(
+    run: Callable[[str], list[dict[str, Any]]], schema: str, months: int = 6
+) -> tuple[list[MarRecord], list[dict[str, Any]]]:
+    """Load MAR and billing through any warehouse's ``run(sql) -> rows`` function.
+
+    MAR is required, so a failure there raises. Each billing table is optional:
+    a table the account does not have is logged and skipped.
+    """
+    first_error: MarError | None = None
+    records: list[MarRecord] | None = None
+    for name_column in CONNECTION_NAME_COLUMNS:
+        try:
+            records = load_rows(run(build_mar_query(schema, months, name_column)))
+            break
+        except MarError as exc:
+            first_error = first_error or exc
+            log.debug("MAR query with %s failed: %s", name_column, exc)
+    if records is None:
+        assert first_error is not None
+        raise first_error
+
+    billing: list[dict[str, Any]] = []
+    for metric, sql in build_billing_queries(schema, months).items():
+        try:
+            billing.extend(normalise_billing_rows(run(sql)))
+        except MarError as exc:
+            log.info("Skipping %s: %s", metric, exc)
+    return records, billing
+
+
+def normalise_billing_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for row in rows:
+        value = row.get("value")
+        if value in (None, ""):
+            continue
+        out.append(
+            {
+                "group_id": str(row.get("group_id") or ""),
+                "measured_month": _normalise_month(row.get("measured_month")),
+                "metric": str(row.get("metric") or ""),
+                "value": float(value),
+            }
+        )
+    return out
 
 
 # -- Loading ---------------------------------------------------------------
@@ -124,10 +215,11 @@ def load_csv(handle: io.TextIOBase) -> list[MarRecord]:
             f"Found: {', '.join(sorted(lookup))}. Generate it with --print-sql."
         )
 
+    fields = REQUIRED_MAR_FIELDS + tuple(f for f in OPTIONAL_MAR_FIELDS if f in lookup)
     records = []
     for line, row in enumerate(reader, start=2):
         try:
-            records.append(_to_record({f: row[lookup[f]] for f in REQUIRED_MAR_FIELDS}))
+            records.append(_to_record({f: row[lookup[f]] for f in fields}))
         except (TypeError, ValueError) as exc:
             raise MarError(f"CSV line {line}: {exc}") from exc
     return records
@@ -146,6 +238,9 @@ def _to_record(row: dict[str, Any]) -> MarRecord:
         table_name=str(row.get("table_name") or "").strip(),
         measured_month=_normalise_month(row.get("measured_month")),
         mar=mar,
+        destination_id=str(row.get("destination_id") or "").strip(),
+        # Exports made before free_type was selected were already filtered to PAID.
+        free_type=str(row.get("free_type") or PAID).strip().upper(),
     )
 
 
@@ -538,9 +633,22 @@ def detect_redshift_platform_schema(config: RedshiftConfig) -> str:
 
 
 def aggregate(records: list[MarRecord]) -> dict[str, Any]:
-    """Roll MAR up to the grains the cost model and the report need."""
+    """Roll paid MAR up to the grains the plan and the report need.
+
+    Every figure here counts ``free_type = 'PAID'`` only; ``non_paid_mar`` is
+    the rest (initial syncs, trials, free re-syncs) for context.
+    """
+    non_paid_mar = sum(r.mar for r in records if not r.paid)
+    records = [r for r in records if r.paid]
     if not records:
-        return {"months": [], "total_mar": 0, "by_connection": {}, "by_table": {}, "monthly": {}}
+        return {
+            "months": [],
+            "total_mar": 0,
+            "non_paid_mar": non_paid_mar,
+            "by_connection": {},
+            "by_table": {},
+            "monthly": {},
+        }
 
     months = sorted({r.measured_month for r in records if r.measured_month})
     by_connection: dict[str, int] = {}
@@ -559,8 +667,10 @@ def aggregate(records: list[MarRecord]) -> dict[str, Any]:
         "months": months,
         "month_count": len(months),
         "total_mar": sum(r.mar for r in records),
-        # The most recent complete month is the fairest single basis for a
-        # monthly cost comparison; an average across a ramp-up understates it.
+        "non_paid_mar": non_paid_mar,
+        # The current month is partial, so the latest full month is the basis
+        # for any per-month figure; an average across a ramp-up understates it.
+        "latest_full_month": latest_full_month(months),
         "latest_month": months[-1] if months else None,
         "latest_month_mar": monthly.get(months[-1], 0) if months else 0,
         "peak_month_mar": max(monthly.values()) if monthly else 0,
@@ -569,3 +679,10 @@ def aggregate(records: list[MarRecord]) -> dict[str, Any]:
         "by_table": dict(sorted(by_table.items(), key=lambda kv: -kv[1])),
         "monthly": dict(sorted(monthly.items())),
     }
+
+
+def latest_full_month(months: Iterable[str], today: dt.date | None = None) -> str | None:
+    """The most recent YYYY-MM before the current (partial) month."""
+    current = (today or dt.date.today()).strftime("%Y-%m")
+    full = [m for m in months if m and m < current]
+    return max(full) if full else None

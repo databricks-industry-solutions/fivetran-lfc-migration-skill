@@ -211,6 +211,7 @@ def _plan_connection(
     return {
         "fivetran": {
             "connection_id": connection.get("id"),
+            "group_id": connection.get("group_id"),
             "service": service,
             "destination_schema": connection.get("destination_schema"),
             "paused": connection.get("paused"),
