@@ -66,23 +66,30 @@ even if there are no blockers.
 
 Present the following to the customer before any bundle is generated:
 
-1. **Estate summary** — connection count, table count, sources by category
-   (SaaS, database CDC, file, streaming, federation, blocked).
-2. **Effort breakdown** — how many connections are low / medium / high / blocked,
-   and what makes each high or blocked.
+1. **Estate summary** — connection count, migratable and not migratable
+   connections, table count, sources by category (SaaS, database CDC, file,
+   streaming, federation, none).
+2. **Effort breakdown** — how many connections are low / medium / high /
+   no_managed_connector, and what makes each high.
 3. **Blockers** — every blocker from `plan.json`, with the connection name and
-   the concrete obstacle. If any connection is `blocked`, explain the
-   `alternative` field (Auto Loader, federation, streaming source).
-4. **Warnings** — hashed columns, private networking, browser-only OAuth,
+   the concrete obstacle. For a `no_managed_connector` connection, present its
+   `alternative` (a Lakeflow Community Connector, Auto Loader, federation, or a
+   streaming source) as another path, not a dead end.
+4. **Tables** — for connectors with a fixed Lakeflow Connect table list
+   (`table_plan` in `plan.json`), account for every table Fivetran syncs: how
+   many pair with a Lakeflow Connect table (and which are renamed), which have
+   no equivalent, which are disabled in Fivetran, and which Lakeflow Connect
+   tables are ingested though no Fivetran table pairs with them.
+5. **Warnings** — hashed columns, private networking, browser-only OAuth,
    connectors not yet GA, and database tables Fivetran confirms have no
    primary key. Present Beta / Public Preview notes as something to confirm
    in the target workspace, never as a finding that the connector is off:
    the planner cannot see the workspace.
-5. **Fivetran consumption and spend** — the `fivetran_spend` and
+6. **Fivetran consumption and spend** — the `fivetran_spend` and
    `fivetran_consumption` sections printed by stage 4. These are recorded
    figures, not estimates; if both are empty, say no Fivetran consumption or
    spend was recorded.
-6. **Recommendation** — which connections to migrate first (lowest effort,
+7. **Recommendation** — which connections to migrate first (lowest effort,
    highest MAR), which to defer, and which need a different architecture.
 
 **Wait here** and ask two questions:
@@ -105,11 +112,14 @@ Present the generated bundle for review before any deployment:
 
 1. **Bundle contents** — list of pipelines, jobs, and connections that will be
    created, with their target schemas and tables.
-2. **Excluded connections** — anything blocked or out of scope, and why.
-3. **Manual steps required** — which UC connections need browser-based OAuth
+2. **Excluded connections** — anything not migratable or out of scope, why,
+   and its other path.
+3. **Renamed tables** — listed under "Renamed tables" in the bundle README;
+   downstream references must move to the Lakeflow Connect name.
+4. **Manual steps required** — which UC connections need browser-based OAuth
    (listed under "Manual connections" in the bundle README and marked `MANUAL`
    in `create_connections.sh`), which source systems need admin setup.
-4. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
+5. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
    equivalents.
 
 **Wait here.** The customer may want to:
@@ -314,7 +324,7 @@ matters is not "supported" but *who has to do the work*:
 | `low` | Fully automatable end to end | Yes |
 | `medium` | Connection is scriptable once a source-system admin does setup and supplies credentials (Salesforce mTLS, ServiceNow ROPC, Workday, NetSuite, GA4 service account) | Yes |
 | `high` | The UC connection needs a one-time interactive browser sign-in (browser-OAuth-only connectors) | Yes; the connection is a manual checklist step |
-| `blocked` | No managed connector; needs a different architecture | No |
+| `no_managed_connector` | No managed connector; the plan's `alternative` names another path (a Lakeflow Community Connector, Auto Loader, federation) | No |
 
 Source-admin work alone never makes a connection `high`. Where a connector
 offers both browser OAuth and a non-interactive path, the plan's
@@ -363,10 +373,24 @@ mean:
   the raw value will land in the bronze table.
 - **Private networking.** Fivetran's SSH tunnel or PrivateLink setup does not
   carry over. Databricks-side network access must be designed separately.
-- **No managed connector.** Check the `alternative` field. Object storage goes
-  to Auto Loader, message buses to a streaming source, warehouses to
-  federation. A blocker means a different architecture, not necessarily that
-  the source cannot move.
+- **No managed connector.** Check the `alternative` field and present it as
+  another path, not a dead end. Object storage goes to Auto Loader, message
+  buses to a streaming source, warehouses to federation, and other sources
+  may have a [Lakeflow Community Connector](https://docs.databricks.com/aws/en/ingestion/community-connectors)
+  (Beta, open source,
+  [databrickslabs/lakeflow-community-connectors](https://github.com/databrickslabs/lakeflow-community-connectors)).
+- **Fixed table lists.** For connectors with `supported_tables` in the
+  catalog, the plan starts from the Lakeflow Connect list and pairs each table
+  with the Fivetran table whose name matches after ignoring case, underscores,
+  and plural endings. Each row in `table_plan` has a `status`: `same_name`,
+  `renamed` (Fivetran `incident` becomes `incidents`), `lakeflow_only` (no
+  Fivetran table pairs; still ingested, so remove any the customer does not
+  need), `disabled_in_fivetran` (not ingested), or `not_available` (enabled in
+  Fivetran, no Lakeflow Connect equivalent; not migrated). A connection where
+  nothing pairs is blocked, with the list the connector does offer.
+- **Renamed tables.** A renamed table lands under its Lakeflow Connect name,
+  not Fivetran's, so views, models, and dashboards that reference the Fivetran
+  name need repointing; check column names against the landed table too.
 
 Two connectors are never faithful one-to-one migrations, and both need saying
 out loud early:

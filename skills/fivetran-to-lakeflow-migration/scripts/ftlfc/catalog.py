@@ -68,7 +68,9 @@ class Effort(str, Enum):
     LOW = "low"  # fully automatable end to end
     MEDIUM = "medium"  # connection is scriptable once a source admin supplies credentials
     HIGH = "high"  # the UC connection needs a one-time interactive browser sign-in
-    BLOCKED = "blocked"  # no managed path; needs a different architecture
+    # No managed connector; the alternative (a community connector, Auto Loader,
+    # federation) is another path, not a dead end.
+    NO_MANAGED_CONNECTOR = "no_managed_connector"
 
 
 @dataclass(frozen=True)
@@ -106,8 +108,9 @@ class Target:
     #: Fixed set of source table names the Lakeflow Connect connector supports.
     #: ``None`` means the connector supports dynamic/user-defined tables (databases,
     #: ServiceNow) or the table list has not been cataloged yet.  When populated,
-    #: any Fivetran table NOT in this set is excluded from the generated pipeline
-    #: and flagged as a coverage gap.
+    #: the plan starts from this list and pairs each table with the Fivetran
+    #: table whose name matches after ignoring case, underscores, and plural
+    #: endings (see ``mapping.name_key``).
     supported_tables: frozenset[str] | None = None
     #: URL to the connector reference page listing supported tables.
     docs_url: str = ""
@@ -129,7 +132,7 @@ class Target:
     @property
     def effort(self) -> Effort:
         if not self.has_managed_connector:
-            return Effort.BLOCKED
+            return Effort.NO_MANAGED_CONNECTOR
         if self.scriptable is Scriptable.NO:
             return Effort.HIGH
         # Source-admin work (certificates, connected apps, API users) is a
@@ -198,6 +201,8 @@ _FEDERATION_ALT = (
     "No dedicated managed connector. Use query-based ingestion through a Lakehouse "
     "Federation foreign catalog, or Delta Sharing / Iceberg where a copy is not needed."
 )
+
+COMMUNITY_CONNECTORS_URL = "https://docs.databricks.com/aws/en/ingestion/community-connectors"
 
 _TYPE_ONLY_VERIFIED = (
     "Connector type confirmed against the SDK IngestionSourceType enum. Release state and "
@@ -269,10 +274,10 @@ def _federated() -> Target:
 # Supported-table sets for managed SaaS connectors.
 #
 # Each frozenset lists the source table names the Lakeflow Connect connector
-# can ingest.  Fivetran tables not in this set are excluded from the generated
-# pipeline and flagged as a coverage gap.  Database CDC, file, and dynamic-
-# table connectors (ServiceNow, Salesforce) use ``None`` instead -- any table
-# the customer has is potentially valid.
+# can ingest.  The plan pairs these with Fivetran's tables by normalised name;
+# enabled Fivetran tables with no pair are reported as not available.  Database
+# CDC, file, and dynamic-table connectors (ServiceNow, Salesforce) use ``None``
+# instead -- any table the customer has is potentially valid.
 # ---------------------------------------------------------------------------
 
 _PAGERDUTY_TABLES = frozenset({
@@ -660,9 +665,10 @@ CATALOG: dict[str, Target] = {
     "pagerduty": _saas(
         "PAGERDUTY",
         availability=Availability.BETA,
+        fixed_source_schema="default",
         supported_tables=_PAGERDUTY_TABLES,
         docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/pagerduty-reference",
-        last_verified=_VERIFIED_DATE,
+        last_verified="2026-11-16",
     ),
     "linkedin_ads": _saas(
         "LINKEDIN_ADS",
@@ -699,8 +705,9 @@ CATALOG: dict[str, Target] = {
     },
     **{
         service: _none(
-            "No managed connector and no federation path. Keep on Fivetran, use a partner "
-            "tool, or build a custom connector."
+            "No managed connector or federation path yet. Check Lakeflow Community "
+            f"Connectors (Beta, open source; {COMMUNITY_CONNECTORS_URL}) for this source, "
+            "or build a custom connector; otherwise keep it on Fivetran or use a partner tool."
         )
         for service in (
             "mongo",
@@ -736,8 +743,9 @@ UNKNOWN = Target(
     availability=Availability.NONE,
     scriptable=Scriptable.NA,
     alternative=(
-        "Not in this catalog. Check the current managed connector list, then fall back to "
-        "a partner tool, a community connector, or a custom connector."
+        "Not in this catalog. Check the current managed connector list and Lakeflow "
+        f"Community Connectors (Beta, open source; {COMMUNITY_CONNECTORS_URL}), then build "
+        "a custom connector or use a partner tool."
     ),
     notes="Unrecognised Fivetran service id.",
 )

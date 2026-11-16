@@ -333,8 +333,13 @@ the spend the customer shares is recorded as given in `fivetran_spend.json`.
 
 Maps each Fivetran connector to a Lakeflow Connect target using a catalog of 70+
 service IDs. Classifies every connection by effort level (low / medium / high /
-blocked) across three dimensions: connector availability, connection
-scriptability, and source-side prerequisites.
+no_managed_connector) across three dimensions: connector availability, connection
+scriptability, and source-side prerequisites. For connectors with a fixed
+Lakeflow Connect table list (PagerDuty, HubSpot, Zendesk, and others), it pairs
+each Lakeflow Connect table with the Fivetran table of the same name, ignoring
+case, underscores, and plural endings (Fivetran `incident` pairs with
+`incidents`), and reports renamed tables, Lakeflow-only tables, and Fivetran
+tables with no equivalent.
 
 ### Stage 4: Consumption
 
@@ -508,9 +513,11 @@ Connector tables inside the customer's destination warehouse.
 **Support is three independent questions, not one flag.** Whether a managed
 connector exists, whether its UC connection can be created without a browser,
 and whether the source system's prerequisites can be scripted. These three
-dimensions produce the four effort levels (low / medium / high / blocked).
-Only `blocked` (no managed connector) keeps a connection out of the bundle;
-browser-OAuth-only connectors are `high` and still get a pipeline and job.
+dimensions produce the four effort levels (low / medium / high /
+no_managed_connector). A connection with no managed connector stays out of the
+bundle but always comes with another path (a Lakeflow Community Connector, Auto
+Loader, or federation); browser-OAuth-only connectors are `high` and still get
+a pipeline and job.
 
 **The skill records cost; it does not estimate it.** It captures Fivetran MAR,
 billed amounts, and any spend the customer shares, exactly as given, and exports

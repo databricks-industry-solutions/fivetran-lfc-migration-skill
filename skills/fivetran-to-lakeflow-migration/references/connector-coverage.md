@@ -27,7 +27,7 @@ Understanding the taxonomy matters, because "does a connector exist?" has five d
 | **Query-based connectors** | Direct scheduled query of a source DB using a monotonically increasing cursor column. No CDC config needed. | Serverless. No gateway, no staging storage. |
 | **Managed streaming connectors** | Continuous read from message buses | Serverless. No gateway. |
 | **Standard connectors** (not managed) | Auto Loader, SFTP, Kafka, Kinesis, Pub/Sub, Pulsar — you author the pipeline | Structured Streaming / Lakeflow pipelines / Databricks SQL |
-| **Community + custom connectors** | Open-source community-built, or DIY | Your pipeline |
+| **Community + custom connectors** | [Lakeflow Community Connectors](https://docs.databricks.com/aws/en/ingestion/community-connectors) (Beta, open source, [databrickslabs/lakeflow-community-connectors](https://github.com/databrickslabs/lakeflow-community-connectors)), or DIY | Your pipeline |
 
 ---
 
@@ -126,7 +126,7 @@ both are left unmapped rather than guessed.
 | Query without copying (Snowflake, Redshift, BigQuery, and others) | **Lakehouse Federation** — and query-based Lakeflow ingestion can read *through* a federation foreign catalog when you do want a copy |
 | SAP Business Data Cloud | **SAP BDC connector using OpenSharing / Delta Sharing** — explicitly *not* Lakeflow Connect |
 | Cross-org data exchange | **Delta Sharing** |
-| Anything with no connector (MongoDB, Google Sheets, Oracle Fusion, Salesforce Data Cloud) | Partner connectors (Fivetran, Qlik, Arcion-class tools), **community connectors**, or **build a custom connector** (`lakeflow-connect/` → "Build a custom connector") |
+| Anything with no connector (MongoDB, Google Sheets, Oracle Fusion, Salesforce Data Cloud) | **Lakeflow Community Connectors** (Beta, open source; check for the source first), partner connectors (Fivetran, Qlik, Arcion-class tools), or **build a custom connector** (`lakeflow-connect/` → "Build a custom connector") |
 | High-throughput direct writes from apps | **Zerobus Ingest** |
 
 ---

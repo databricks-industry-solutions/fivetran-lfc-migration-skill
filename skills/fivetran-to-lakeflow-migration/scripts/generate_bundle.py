@@ -91,11 +91,11 @@ def _report(plan: dict, output: Path, files: dict) -> None:
     print(f"    {step}. databricks bundle validate --strict -t dev")
     print(f"    {step + 1}. databricks bundle deploy -t dev")
 
-    blocked = summary["connections_blocked"]
-    if blocked:
+    not_migratable = summary["connections_not_migratable"]
+    if not_migratable:
         print(
-            f"\n  {blocked} connection(s) are absent from the bundle because they have no "
-            f"managed Lakeflow Connect connector. See {output}/README.md.",
+            f"\n  {not_migratable} connection(s) are absent from the bundle; see "
+            f"'Not included' in {output}/README.md for why and for other paths.",
             file=sys.stderr,
         )
 

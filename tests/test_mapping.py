@@ -10,8 +10,17 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.catalog import CATALOG, Category, Effort, Gateway, Scriptable, lookup
-from ftlfc.mapping import CRON_BY_MINUTES, build_plan, to_identifier
+from ftlfc.catalog import (
+    CATALOG,
+    COMMUNITY_CONNECTORS_URL,
+    UNKNOWN,
+    Category,
+    Effort,
+    Gateway,
+    Scriptable,
+    lookup,
+)
+from ftlfc.mapping import CRON_BY_MINUTES, build_plan, name_key, to_identifier
 
 
 class TestCatalog:
@@ -88,11 +97,20 @@ class TestCatalog:
             if target.effort is Effort.HIGH:
                 assert target.scriptable is Scriptable.NO, service
 
-    def test_sources_without_a_connector_are_blocked_with_an_alternative(self) -> None:
+    def test_sources_without_a_connector_come_with_an_alternative(self) -> None:
         target = lookup("s3")
         assert target.has_managed_connector is False
-        assert target.effort is Effort.BLOCKED
+        assert target.effort is Effort.NO_MANAGED_CONNECTOR
+        assert target.effort.value == "no_managed_connector"
         assert "Auto Loader" in target.alternative
+
+    @pytest.mark.parametrize("target", [lookup("mongo"), UNKNOWN])
+    def test_no_connector_alternatives_point_at_community_connectors(self, target) -> None:
+        assert "Lakeflow Community Connectors (Beta, open source" in target.alternative
+        assert COMMUNITY_CONNECTORS_URL in target.alternative
+
+    def test_pagerduty_addresses_tables_under_the_default_schema(self) -> None:
+        assert lookup("pagerduty").fixed_source_schema == "default"
 
     def test_warehouses_route_to_federation(self) -> None:
         assert lookup("snowflake_db").category is Category.FEDERATION
@@ -235,7 +253,7 @@ class TestBuildPlan:
         ]
         plan = build_plan(_inventory(_connection(service="pagerduty", objects=tables)), "main_prod")
         item = plan["items"][0]
-        assert len(item["objects"]) == 3
+        assert item["table_counts"]["paired"] == 3
         assert all(o["table_configuration"]["scd_type"] == "SCD_TYPE_1" for o in item["objects"])
         assert all("primary_keys" not in o["table_configuration"] for o in item["objects"])
         assert not [w for w in item["warnings"] if "primary key" in w.lower()]
@@ -283,12 +301,15 @@ class TestBuildPlan:
         assert len(plan["items"]) == 1
 
     def test_browser_oauth_source_is_a_warning_not_a_blocker(self) -> None:
-        plan = build_plan(_inventory(_connection(service="hubspot")), "main_prod")
+        plan = build_plan(
+            _inventory(_connection(service="hubspot", objects=[_table(source_table="contacts")])),
+            "main_prod",
+        )
         item = plan["items"][0]
         assert item["blockers"] == []
         assert any("browser-based OAuth only" in w for w in item["warnings"])
         assert item["target"]["effort"] == "high"
-        assert plan["summary"]["connections_blocked"] == 0
+        assert plan["summary"]["connections_not_migratable"] == 0
         assert plan["summary"]["connections_manual_sign_in"] == 1
 
     def test_conditional_warning_names_the_generated_auth_path(self) -> None:
@@ -407,78 +428,191 @@ class TestSchedule:
         assert plan["items"][0]["schedule"]["quartz_cron_expression"] == CRON_BY_MINUTES[360]
 
 
-class TestSupportedTableFiltering:
-    """Verify that unsupported Fivetran tables are excluded from the plan."""
+def _pd_table(name: str, **overrides) -> dict:
+    return _table(
+        source_schema="pagerduty",
+        source_table=name,
+        destination_table=name,
+        primary_keys=["id"],
+        **overrides,
+    )
 
-    def test_supported_tables_pass_through(self) -> None:
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[
-                        _table(source_table="incidents"),
-                        _table(source_table="teams"),
-                    ],
-                )
-            ),
-            "main_prod",
-        )
-        tables = [o["source_table"] for o in plan["items"][0]["objects"]]
-        assert tables == ["incidents", "teams"]
 
-    def test_unsupported_tables_are_excluded_with_warning(self) -> None:
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[
-                        _table(source_table="incidents"),
-                        _table(source_table="extension"),
-                        _table(source_table="extension_schema_option"),
-                    ],
-                )
-            ),
-            "main_prod",
-        )
+# A real PagerDuty connection from native-skill validation: Fivetran uses singular
+# names for most tables, Lakeflow Connect plural ones.
+_PD_PAIRED = (
+    "incident",
+    "service",
+    "team",
+    "schedule",
+    "escalation_policy",
+    "audit_record",
+    "on_call",
+    "log_entries",
+    "users",
+)
+_PD_UNPAIRED = (
+    "incident_log_entry",
+    "service_dependency",
+    "team_membership",
+    "escalation_rule",
+    "user_contact_method",
+    "vendor",
+)
+
+
+def _pd_plan(*tables: dict) -> dict:
+    return build_plan(_inventory(_connection(service="pagerduty", objects=list(tables))), "main")
+
+
+def _statuses(item: dict) -> dict:
+    return {
+        (row["fivetran_table"], row["lakeflow_table"]): row["status"] for row in item["table_plan"]
+    }
+
+
+class TestNameKey:
+    @pytest.mark.parametrize(
+        "fivetran,lakeflow",
+        [
+            ("incident", "incidents"),
+            ("escalation_policy", "escalation_policies"),
+            ("on_call", "oncalls"),
+            ("audit_record", "audit_records"),
+            ("log_entries", "log_entries"),
+            ("Users", "users"),
+        ],
+    )
+    def test_fivetran_and_lakeflow_spellings_meet(self, fivetran: str, lakeflow: str) -> None:
+        assert name_key(fivetran) == name_key(lakeflow)
+
+    def test_distinct_tables_stay_distinct(self) -> None:
+        assert name_key("incident_log_entry") != name_key("log_entries")
+
+
+class TestSupportedTablePairing:
+    """Mirrors the native skill's plan_tables view and its eval fixture."""
+
+    def test_real_pagerduty_connection(self) -> None:
+        plan = _pd_plan(*(_pd_table(t) for t in _PD_PAIRED + _PD_UNPAIRED))
         item = plan["items"][0]
-        tables = [o["source_table"] for o in item["objects"]]
-        assert "incidents" in tables
-        assert "extension" not in tables
-        assert "extension_schema_option" not in tables
-        assert any("no Lakeflow Connect equivalent" in w for w in item["warnings"])
-        assert any("extension" in w for w in item["warnings"])
 
-    def test_all_tables_unsupported_leaves_empty_objects_list(self) -> None:
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[
-                        _table(source_table="fake_table_1"),
-                        _table(source_table="fake_table_2"),
-                    ],
-                )
-            ),
-            "main_prod",
+        assert item["blockers"] == []
+        assert item["table_counts"] == {
+            "tables": 10,
+            "paired": 9,
+            "renamed": 7,
+            "lakeflow_only": 1,
+            "not_available": len(_PD_UNPAIRED),
+            "disabled_in_fivetran": 0,
+        }
+        statuses = _statuses(item)
+        assert statuses[("log_entries", "log_entries")] == "same_name"
+        assert statuses[("users", "users")] == "same_name"
+        assert statuses[("incident", "incidents")] == "renamed"
+        assert statuses[("escalation_policy", "escalation_policies")] == "renamed"
+        assert statuses[("on_call", "oncalls")] == "renamed"
+        assert statuses[(None, "priorities")] == "lakeflow_only"
+        assert statuses[("vendor", None)] == "not_available"
+
+        objects = {o["source_table"]: o for o in item["objects"]}
+        assert set(objects) == set(lookup("pagerduty").supported_tables)
+        assert {o["source_schema"] for o in objects.values()} == {"default"}
+        # A renamed table lands under its Lakeflow Connect name.
+        assert objects["incidents"]["fivetran_table"] == "incident"
+        assert objects["incidents"]["destination_table"] == "incidents"
+        assert objects["incidents"]["table_configuration"]["primary_keys"] == ["id"]
+        assert objects["priorities"]["fivetran_table"] is None
+        assert "primary_keys" not in objects["priorities"]["table_configuration"]
+
+        summary = plan["summary"]
+        assert summary["tables_total"] == 10
+        assert summary["tables_paired"] == 9
+        assert summary["tables_renamed"] == 7
+        assert summary["tables_lakeflow_only"] == 1
+        assert summary["tables_not_available"] == len(_PD_UNPAIRED)
+
+    def test_warnings_name_renamed_lakeflow_only_and_unavailable_tables(self) -> None:
+        item = _pd_plan(_pd_table("incident"), _pd_table("users"), _pd_table("vendor"))["items"][0]
+        warnings = "\n".join(item["warnings"])
+        assert (
+            "1 table(s) have a different name in PAGERDUTY, so downstream references change "
+            "(Fivetran as Lakeflow Connect): incident as incidents." in warnings
         )
+        assert "8 PAGERDUTY table(s) match no table Fivetran lists and are ingested too" in warnings
+        assert (
+            "1 Fivetran table(s) have no PAGERDUTY equivalent and are not migrated: "
+            "pagerduty.vendor." in warnings
+        )
+        assert "pagerduty-reference" in warnings
+
+    def test_disabled_fivetran_table_is_excluded_with_a_warning(self) -> None:
+        item = _pd_plan(_pd_table("incident"), _pd_table("team", enabled=False))["items"][0]
+        assert _statuses(item)[("team", "teams")] == "disabled_in_fivetran"
+        assert "teams" not in {o["source_table"] for o in item["objects"]}
+        assert item["table_counts"]["disabled_in_fivetran"] == 1
+        assert any(
+            "1 table(s) disabled in Fivetran are not migrated (pagerduty.team)" in w
+            for w in item["warnings"]
+        )
+
+    def test_no_pairing_table_blocks_with_the_offered_list(self) -> None:
+        # Anaplan-style: Fivetran syncs model data the connector does not cover.
+        plan = _pd_plan(_pd_table("module"), _pd_table("list_item"))
         item = plan["items"][0]
-        assert len(item["objects"]) == 0
-        assert any("2 Fivetran table(s)" in w for w in item["warnings"])
+        offered = ", ".join(sorted(lookup("pagerduty").supported_tables))
+        assert item["blockers"] == [
+            (
+                f"None of the tables Fivetran syncs has an equivalent in PAGERDUTY, which offers "
+                f"{offered}. Enable one in Fivetran and re-run discovery, check Lakeflow "
+                "Community Connectors (Beta) for one that covers these tables, or keep this "
+                "connection on Fivetran."
+            )
+        ]
+        assert item["objects"] == []
+        assert not any("match no table Fivetran lists" in w for w in item["warnings"])
+        assert plan["summary"]["connections_not_migratable"] == 1
+        assert plan["summary"]["tables_total"] == 0
+        assert plan["summary"]["tables_not_available"] == 2
 
-    def test_tables_dropped_counted_in_summary(self) -> None:
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[
-                        _table(source_table="incidents"),
-                        _table(source_table="extension"),
-                    ],
-                )
-            ),
-            "main_prod",
-        )
-        assert plan["summary"]["tables_dropped"] >= 1
+    def test_only_disabled_pairs_still_block(self) -> None:
+        item = _pd_plan(_pd_table("incident", enabled=False))["items"][0]
+        assert item["blockers"][0].startswith("None of the tables Fivetran syncs")
+
+    def test_tie_break_prefers_an_enabled_table(self) -> None:
+        item = _pd_plan(_pd_table("incidents", enabled=False), _pd_table("incident"))["items"][0]
+        assert _statuses(item)[("incident", "incidents")] == "renamed"
+
+    def test_tie_break_then_prefers_the_exact_name(self) -> None:
+        item = _pd_plan(_pd_table("incident"), _pd_table("incidents"))["items"][0]
+        statuses = _statuses(item)
+        assert statuses[("incidents", "incidents")] == "same_name"
+        assert statuses[("incident", None)] == "not_available"
+
+    def test_matching_is_case_insensitive(self) -> None:
+        item = _pd_plan(_pd_table("Incidents"))["items"][0]
+        assert _statuses(item)[("Incidents", "incidents")] == "same_name"
+
+    def test_long_lists_are_cut_at_ten(self) -> None:
+        extra = [_pd_table(f"extra_{n:02d}") for n in range(12)]
+        item = _pd_plan(_pd_table("incident"), *extra)["items"][0]
+        (warning,) = [w for w in item["warnings"] if "not migrated:" in w]
+        assert warning.startswith("12 Fivetran table(s)")
+        assert "pagerduty.extra_09 and 2 more." in warning
+
+    def test_empty_database_connection_is_a_blocker(self) -> None:
+        item = build_plan(_inventory(_connection()), "main")["items"][0]
+        assert item["blockers"] == [
+            (
+                "No enabled tables to ingest. Enable tables in Fivetran and re-run discovery "
+                "(without --no-schemas)."
+            )
+        ]
+
+    def test_connector_without_supported_tables_has_no_table_plan(self) -> None:
+        item = build_plan(_inventory(_connection(objects=[_table()])), "main")["items"][0]
+        assert item["table_plan"] is None
+        assert item["objects"][0]["status"] == "same_name"
 
     def test_connector_without_supported_tables_includes_all(self) -> None:
         """Connectors with supported_tables=None (dynamic table set) include
@@ -498,34 +632,6 @@ class TestSupportedTableFiltering:
         tables = [o["source_table"] for o in plan["items"][0]["objects"]]
         assert "Customers" in tables
         assert "AnyCustomTable" in tables
-
-    def test_table_filtering_is_case_insensitive(self) -> None:
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[_table(source_table="Incidents")],
-                )
-            ),
-            "main_prod",
-        )
-        assert len(plan["items"][0]["objects"]) == 1
-
-    def test_docs_url_included_in_dropped_table_warning(self) -> None:
-        plan = build_plan(
-            _inventory(
-                _connection(
-                    service="pagerduty",
-                    objects=[_table(source_table="extension")],
-                )
-            ),
-            "main_prod",
-        )
-        dropped_warnings = [
-            w for w in plan["items"][0]["warnings"]
-            if "no Lakeflow Connect equivalent" in w
-        ]
-        assert any("pagerduty-reference" in w for w in dropped_warnings)
 
 
 class TestCatalogSupportedTables:

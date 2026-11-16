@@ -12,6 +12,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-mig
 sys.path.insert(0, str(SCRIPTS))
 
 from ftlfc.bundle import build_bundle
+from ftlfc.mapping import build_plan
 
 
 def _item(
@@ -77,7 +78,7 @@ def _plan(*items, catalog: str = "main_prod") -> dict:
         "items": item_list,
         "summary": {
             "connections_total": len(item_list),
-            "connections_blocked": len(item_list) - len(migratable),
+            "connections_not_migratable": len(item_list) - len(migratable),
             "tables_total": sum(len(i["objects"]) for i in migratable),
             "gateways_required": sum(1 for i in migratable if i["target"]["gateway"] == "required"),
         },
@@ -398,59 +399,59 @@ class TestBrowserOAuthConnections:
         assert "Not included" not in readme
 
 
-class TestAutoDiscoverForManagedSaas:
-    """When a managed SaaS connector has a cataloged supported-table list,
-    the bundle should emit a schema-level ingestion spec (auto-discover)
-    rather than an explicit per-table objects list."""
+def _pagerduty_plan() -> dict:
+    def table(name: str, enabled: bool = True) -> dict:
+        return {
+            "source_schema": "pagerduty",
+            "source_table": name,
+            "destination_table": name,
+            "enabled": enabled,
+            "primary_keys": ["id"],
+            "primary_keys_known": True,
+        }
 
-    def _item_with_supported_tables(self, **overrides) -> dict:
-        item = _item(**overrides)
-        item["target"]["has_supported_tables"] = True
-        return item
+    connection = {
+        "id": "pd1",
+        "service": "pagerduty",
+        "destination_schema": "pagerduty",
+        "sync_frequency_minutes": 60,
+        "objects": [table("incident"), table("users"), table("team", enabled=False)],
+    }
+    return build_plan({"connections": [connection]}, "main")
 
-    def test_saas_with_supported_tables_emits_schema_level_object(self) -> None:
-        item = self._item_with_supported_tables(connection_type="PAGERDUTY")
-        files = build_bundle(_plan(item), "acme")
-        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
-            "sales_abc"
-        ]
+
+class TestSupportedTableObjects:
+    """Connectors with a supported-table list get table objects named as Lakeflow
+    Connect names them, never a schema object."""
+
+    def test_pagerduty_pipeline_lists_lakeflow_tables(self) -> None:
+        plan = _pagerduty_plan()
+        files = build_bundle(plan, "acme")
+        key = plan["items"][0]["target"]["pipeline_name"]
+        pipeline = _load(files, f"resources/{key}.pipeline.yml")["resources"]["pipelines"][key]
         objects = pipeline["ingestion_definition"]["objects"]
-        assert len(objects) == 1
-        assert "schema" in objects[0]
-        assert "table" not in objects[0]
-        assert objects[0]["schema"]["destination_catalog"] == "${var.dest_catalog}"
+
+        assert all(set(o) == {"table"} for o in objects)
+        by_name = {o["table"]["source_table"]: o["table"] for o in objects}
+        assert "incidents" in by_name and "users" in by_name
+        # Turned off in Fivetran, so not ingested.
+        assert "teams" not in by_name
+        assert {t["source_schema"] for t in by_name.values()} == {"default"}
+        assert by_name["incidents"]["destination_table"] == "incidents"
+
+    def test_readme_lists_renamed_tables(self) -> None:
+        readme = build_bundle(_pagerduty_plan(), "acme")["README.md"]
+        assert "## Renamed tables" in readme
+        assert "| `incident` | `pagerduty.incidents` |" in readme
 
     def test_saas_without_supported_tables_emits_explicit_objects(self) -> None:
-        item = _item()
-        files = build_bundle(_plan(item), "acme")
+        files = build_bundle(_plan(_item()), "acme")
         pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
             "sales_abc"
         ]
         objects = pipeline["ingestion_definition"]["objects"]
         assert "table" in objects[0]
         assert "schema" not in objects[0]
-
-    def test_gateway_source_keeps_explicit_objects_even_with_supported_tables(self) -> None:
-        item = self._item_with_supported_tables(
-            connection_type="SQLSERVER", gateway="required"
-        )
-        item["target"]["category"] = "database_cdc"
-        files = build_bundle(_plan(item), "acme")
-        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
-            "sales_abc"
-        ]
-        objects = pipeline["ingestion_definition"]["objects"]
-        assert "table" in objects[0]
-
-    def test_auto_discover_uses_source_schema_from_objects(self) -> None:
-        item = self._item_with_supported_tables(connection_type="PAGERDUTY")
-        item["objects"][0]["source_schema"] = "default"
-        files = build_bundle(_plan(item), "acme")
-        pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
-            "sales_abc"
-        ]
-        schema_spec = pipeline["ingestion_definition"]["objects"][0]["schema"]
-        assert schema_spec["source_schema"] == "default"
 
 
 def _reused(scriptable: str = "yes", verified: bool = False) -> dict:

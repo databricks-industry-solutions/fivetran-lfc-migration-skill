@@ -194,33 +194,11 @@ def _ingestion_definition(item: dict[str, Any], needs_gateway: bool, key: str) -
     if is_integrated_cdc:
         definition["connector_type"] = "CDC"
 
-    # For managed SaaS connectors whose supported-table set is cataloged, omit
-    # the explicit objects list and let the connector auto-discover its tables
-    # from the source.  This avoids runtime failures from Fivetran tables that
-    # the Lakeflow connector doesn't support, and picks up any new tables the
-    # connector adds in the future.  The plan still reports which Fivetran
-    # tables have no Lakeflow equivalent.
-    #
-    # Database CDC and gateway sources keep the explicit list because their
-    # tables are user-defined and the plan's filtering does not apply.
-    if (
-        target.get("category") == "saas_managed"
-        and target.get("has_supported_tables")
-        and not needs_gateway
-    ):
-        definition["objects"] = [
-            {
-                "schema": {
-                    "source_schema": item["objects"][0]["source_schema"]
-                    if item["objects"]
-                    else "default",
-                    "destination_catalog": "${var.dest_catalog}",
-                    "destination_schema": target["destination_schema"],
-                }
-            }
-        ]
-    else:
-        definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
+    # Always table objects, never a schema object: a schema object would also
+    # ingest tables the customer turned off in Fivetran, and schema-level
+    # ingestion is not documented for every connector. For connectors with a
+    # supported-table list, source_table is already the Lakeflow Connect name.
+    definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
 
     # Integrated CDC stages extracted change data through a UC volume. Naming the
     # catalog/schema keeps it in the bundle's staging location; the pipeline
@@ -577,14 +555,40 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
                 f"`{item['fivetran']['connection_id']}` |"
             )
 
+    renamed = [
+        (item, obj)
+        for item in migratable
+        for obj in item["objects"]
+        if obj.get("status") == "renamed"
+    ]
+    if renamed:
+        lines += [
+            "",
+            "## Renamed tables",
+            "",
+            (
+                "These tables land under the Lakeflow Connect name, not Fivetran's. Repoint "
+                "downstream references and check column names against the landed table."
+            ),
+            "",
+            "| Fivetran table | Lakeflow Connect table | Pipeline |",
+            "|---|---|---|",
+        ]
+        for item, obj in renamed:
+            lines.append(
+                f"| `{obj['fivetran_table']}` | `{obj['destination_schema']}."
+                f"{obj['destination_table']}` | `{item['target']['pipeline_name']}` |"
+            )
+
     if blocked:
         lines += [
             "",
             "## Not included",
             "",
             (
-                "These Fivetran connections have no managed Lakeflow Connect connector and are "
-                "absent from this bundle:"
+                "These Fivetran connections are absent from this bundle. The reason below "
+                "comes with another path where one exists (a Lakeflow Community Connector, "
+                "Auto Loader, federation, or keeping the connection on Fivetran):"
             ),
             "",
         ]
