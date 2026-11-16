@@ -56,6 +56,35 @@ stage 6 runs deliberately. The one exception is the consumption export, which
 copies files to a Unity Catalog volume only when the customer asks for that at
 Gate 1.
 
+## Setup
+
+Before stage 1, ask in one message (skip anything the user already named):
+
+1. **Target catalog** for the migrated tables (`--dest-catalog`; Gate 2 uses
+   `<target_catalog>_dev` for dev unless told otherwise).
+2. **Where the Fivetran API key and secret are stored**: two Unity Catalog
+   secret names (`catalog.schema.secret`), a workspace secret scope and its two
+   keys, or not yet. Pass them to discovery as `--secret-store uc|scope
+   --api-key-ref ... --api-secret-ref ...`.
+3. **Databricks CLI profile** (off Databricks compute only).
+4. **Fivetran group** to limit discovery to, if any.
+5. **SQL Server architecture** (`integrated` or `gateway`), if the estate has
+   SQL Server.
+6. **UC connections to reuse**, if any.
+7. **Current Fivetran spend** (optional): monthly amount, month, whether it is
+   an invoice, contract, or estimate, and MAR if known.
+
+**Credentials.** Fivetran credentials live only in Unity Catalog secrets or a
+workspace secret scope, at the refs the user names. Never ask for, print, or
+store their values, and never look in scopes, schemas, or secrets the user did
+not name; if a read fails, report the error (it names the ref, store, and
+reason) and ask. If the user pastes credentials into chat, do not use, repeat,
+or write them anywhere. Tell them to store them as Unity Catalog secrets
+(Catalog Explorer, **Create > Secret**) or in a workspace secret scope with
+`databricks secrets put-secret` from their own terminal, and to rotate the
+pasted key in Fivetran (Account Settings > API Config), because the chat
+history keeps it.
+
 ## Review gates
 
 There are two mandatory gates. At each one the agent **must stop, present the
@@ -178,9 +207,23 @@ Fivetran MCP read tools when configured. Read-only; secret-looking config values
 are redacted before anything is written to disk.
 
 ```bash
-export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
-python3 ${SCRIPTS}/fivetran_discover.py -o ${FTLFC_OUT}/inventory.json
+# Unity Catalog secrets (needs READ SECRET, USE CATALOG, USE SCHEMA)
+python3 ${SCRIPTS}/fivetran_discover.py --secret-store uc \
+  --api-key-ref <catalog>.<schema>.<key_secret> \
+  --api-secret-ref <catalog>.<schema>.<secret_secret> \
+  -o ${FTLFC_OUT}/inventory.json
+
+# Workspace secret scope (Databricks compute only; defaults fivetran/api-key, fivetran/api-secret)
+python3 ${SCRIPTS}/fivetran_discover.py --secret-store scope -o ${FTLFC_OUT}/inventory.json
 ```
+
+Off Databricks compute, add `--databricks-profile <profile>` so Unity Catalog
+secrets are read through the CLI; workspace scopes cannot be read there. With
+no secret store configured, discovery falls back to `FIVETRAN_API_KEY` /
+`FIVETRAN_API_SECRET` if set. Reading Unity Catalog secrets with `dbutils`
+needs serverless environment 4+ or DBR 17.3 LTS+; older compute uses the
+Unity Catalog secrets API instead. Note that SQL `secret()` reads workspace
+scopes only.
 
 `--columns` is optional and not needed for planning. It fetches every
 column per table (one rate-limited request each) and only adds primary keys
@@ -192,8 +235,7 @@ come back without it.
 **Fivetran MCP path:** use `fivetran_list_groups`, `fivetran_list_connections_in_group`,
 and `fivetran_get_connection_schema_config`, then assemble `inventory.json`
 (`fivetran_get_connection_column_config` is the `--columns` equivalent, and
-likewise not needed), or run `fivetran_discover.py` after exporting
-API credentials.
+likewise not needed), or run `fivetran_discover.py` with the secret refs.
 
 ## Stage 2: Measure (Assessment)
 
@@ -506,8 +548,9 @@ Then the customer cuts over in this order (do not compress it):
 After preflight exports `${SCRIPTS}` and `${FTLFC_OUT}`:
 
 ```bash
-export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
 python3 ${SCRIPTS}/fivetran_discover.py -g <group_id> \
+  --secret-store uc --api-key-ref <catalog>.<schema>.<key_secret> \
+  --api-secret-ref <catalog>.<schema>.<secret_secret> \
   -o ${FTLFC_OUT}/inventory.json
 python3 ${SCRIPTS}/fivetran_mar.py --warehouse-id <id> --profile <profile> \
   -o ${FTLFC_OUT}/mar.json

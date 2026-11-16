@@ -112,13 +112,43 @@ pip install -e ".[dev]"
 
 #### 3. Configure credentials
 
+Get an API key and secret from the Fivetran dashboard under **Account
+Settings > API Config**. The skill only issues GET requests and never modifies
+Fivetran state.
+
+Store them as **Unity Catalog secrets** and point discovery at them. Create
+each secret in **Catalog Explorer** (open the schema, then **Create > Secret**)
+rather than with `databricks secrets-uc create-secret`, which takes the value
+as a command-line argument and leaves it in shell history. The identity that
+runs discovery needs these grants (Databricks SQL):
+
+```sql
+GRANT USE CATALOG ON CATALOG main TO `migration-user@example.com`;
+GRANT USE SCHEMA ON SCHEMA main.fivetran TO `migration-user@example.com`;
+GRANT READ SECRET ON SECRET main.fivetran.api_key TO `migration-user@example.com`;
+GRANT READ SECRET ON SECRET main.fivetran.api_secret TO `migration-user@example.com`;
+```
+
+```bash
+python3 skills/fivetran-to-lakeflow-migration/scripts/fivetran_discover.py \
+  --secret-store uc \
+  --api-key-ref main.fivetran.api_key --api-secret-ref main.fivetran.api_secret \
+  --databricks-profile <profile-name> -o out/inventory.json
+```
+
+The same settings can come from `FIVETRAN_SECRET_STORE`, `FIVETRAN_API_KEY_REF`,
+and `FIVETRAN_API_SECRET_REF`. Off Databricks compute, Unity Catalog secrets are
+read through the Databricks CLI profile; workspace secret scopes can only be
+read on Databricks compute (see Genie Code below). If a secret cannot be read,
+discovery stops with the ref, the store, and the reason, and does not look
+anywhere else.
+
+For a quick local run you can still export the values directly:
+
 ```bash
 export FIVETRAN_API_KEY=<your-api-key>
 export FIVETRAN_API_SECRET=<your-api-secret>
 ```
-
-Get these from the Fivetran dashboard under **Account Settings > API Config**.
-The skill only issues GET requests and never modifies Fivetran state.
 
 #### 4. (Optional) Configure Databricks CLI
 
@@ -150,7 +180,7 @@ Upload the **entire** skill folder: `SKILL.md`, `requirements.txt`,
 
 - Genie Code **Agent mode** enabled
 - Permission to write under `.assistant/skills/` (user folder or workspace folder)
-- Fivetran **Account Settings > API Config** key + secret (read-only; Standard plan or above), stored by the customer in a **Databricks secret scope** (see step 3)
+- Fivetran **Account Settings > API Config** key + secret (read-only; Standard plan or above), stored by the customer as **Unity Catalog secrets** or in a **workspace secret scope** (see step 3)
 - A SQL warehouse the user can query, if MAR lives in Databricks (stage 2)
 - `WRITE VOLUME` on a Unity Catalog volume, if the customer wants the consumption export saved there
 
@@ -211,34 +241,31 @@ description looks stale).
    - *Migrate Fivetran connectors to Lakeflow Connect*
    - *Run the Fivetran to Lakeflow Connect skill end to end, stop at each review gate*
 
-3. Provide Fivetran credentials from a **Databricks secret scope** so they
-   stay in the workspace and never get pasted into a committed notebook.
+3. Store the Fivetran credentials as Databricks secrets so they stay in the
+   workspace and never get pasted into chat or a notebook. Discovery reads them
+   itself; nothing is exported into the shell.
 
-   The customer creates the scope once (any machine with the workspace CLI
-   profile; skip if it already exists):
+   - **Unity Catalog secrets (recommended).** Create `api_key` and
+     `api_secret` in a schema through **Catalog Explorer → Create > Secret**,
+     and grant the Genie Code user `USE CATALOG`, `USE SCHEMA`, and
+     `READ SECRET` (SQL in [step 3 of the local setup](#3-configure-credentials)).
+     Reading them with `dbutils` needs serverless environment 4+ or DBR
+     17.3 LTS+; older compute falls back to the Unity Catalog secrets API.
+     Tell the agent the store and refs, for example `--secret-store uc
+     --api-key-ref main.fivetran.api_key --api-secret-ref main.fivetran.api_secret`.
+   - **Workspace secret scope.** Create the scope once and let the CLI prompt
+     for each value (no `--string-value`, so nothing lands in shell history):
 
-   ```bash
-   PROFILE=<workspace-profile>
-   databricks secrets create-scope fivetran --profile "$PROFILE"
-   databricks secrets put-secret fivetran api-key \
-     --string-value <fivetran-api-key> --profile "$PROFILE"
-   databricks secrets put-secret fivetran api-secret \
-     --string-value <fivetran-api-secret> --profile "$PROFILE"
-   ```
+     ```bash
+     PROFILE=<workspace-profile>
+     databricks secrets create-scope fivetran --profile "$PROFILE"
+     databricks secrets put-secret fivetran api-key --profile "$PROFILE"
+     databricks secrets put-secret fivetran api-secret --profile "$PROFILE"
+     ```
 
-   Then, in the Genie Code session, point the skill at that scope by reading the
-   values and exporting the environment variables the stages already use
-   (Genie Code runs on Databricks compute, so `dbutils` is available):
-
-   ```bash
-   export FIVETRAN_API_KEY=$(python3 -c "from databricks.sdk.runtime import dbutils; print(dbutils.secrets.get('fivetran','api-key'))")
-   export FIVETRAN_API_SECRET=$(python3 -c "from databricks.sdk.runtime import dbutils; print(dbutils.secrets.get('fivetran','api-secret'))")
-   ```
-
-   Use whatever scope and key names the customer chose. Because Genie Code may
-   run each bash step in a fresh shell, re-export these at the start of any step
-   that calls the Fivetran API (stage 1 discovery). No skill code changes are
-   needed — the scripts read `FIVETRAN_API_KEY` / `FIVETRAN_API_SECRET` as usual.
+     With the default names (`fivetran/api-key`, `fivetran/api-secret`), no
+     flags are needed on Databricks compute; otherwise pass `--secret-store
+     scope --api-key-ref <scope>/<key> --api-secret-ref <scope>/<key>`.
 
 4. Confirm the agent runs **preflight** first (`scripts/preflight.py --export
    --install-deps`) so `${SCRIPTS}` and `${FTLFC_OUT}` exist. Genie Code does
@@ -267,11 +294,13 @@ Laptop / Claude Code. For a customer-run Genie Code session, use
 
 ```bash
 source .venv/bin/activate
-export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
 S=skills/fivetran-to-lakeflow-migration/scripts
 
-# Stage 1: Discover the Fivetran estate (read-only)
-python3 $S/fivetran_discover.py -o out/inventory.json
+# Stage 1: Discover the Fivetran estate (read-only). Credentials come from
+# Unity Catalog secrets (see Installation step 3) or FIVETRAN_API_KEY/SECRET.
+python3 $S/fivetran_discover.py --secret-store uc \
+  --api-key-ref main.fivetran.api_key --api-secret-ref main.fivetran.api_secret \
+  --databricks-profile <profile-name> -o out/inventory.json
 
 # Stage 2: Collect Fivetran MAR and billing from the Platform Connector
 python3 $S/fivetran_mar.py --warehouse-id <id> --profile <profile> \

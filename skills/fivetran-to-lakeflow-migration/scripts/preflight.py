@@ -19,7 +19,12 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ftlfc.credentials import SecretError, resolve_source
 
 
 def resolve_skill_dir(explicit: str | None) -> Path:
@@ -48,12 +53,22 @@ def check_pyyaml() -> tuple[bool, str]:
         return False, f"pip install failed: {tail}"
 
 
-def check_fivetran_creds() -> tuple[bool, str]:
-    key = os.environ.get("FIVETRAN_API_KEY")
-    secret = os.environ.get("FIVETRAN_API_SECRET")
-    if key and secret:
+def check_fivetran_creds(env: Mapping[str, str] | None = None) -> tuple[bool, str]:
+    """Check where credentials are configured without reading any secret value."""
+    env = os.environ if env is None else env
+    try:
+        source = resolve_source(env=env)
+    except SecretError as exc:
+        return False, str(exc)
+    if source is not None:
+        return True, f"{source.describe()} (read at discovery)"
+    if env.get("FIVETRAN_API_KEY") and env.get("FIVETRAN_API_SECRET"):
         return True, "env vars set"
-    return False, "set FIVETRAN_API_KEY and FIVETRAN_API_SECRET (or use Fivetran MCP)"
+    return False, (
+        "set FIVETRAN_SECRET_STORE with FIVETRAN_API_KEY_REF and FIVETRAN_API_SECRET_REF "
+        "(or pass --secret-store and the ref flags to discovery), set FIVETRAN_API_KEY "
+        "and FIVETRAN_API_SECRET, or use Fivetran MCP"
+    )
 
 
 def check_databricks_cli(profile: str | None) -> tuple[bool, str]:

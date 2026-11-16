@@ -3,8 +3,13 @@
 
 Read-only. Writes a versioned inventory JSON that every later stage consumes.
 
-    export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
-    python3 fivetran_discover.py --output out/inventory.json
+    python3 fivetran_discover.py --secret-store uc \
+        --api-key-ref main.fivetran.api_key --api-secret-ref main.fivetran.api_secret \
+        --databricks-profile PROFILE --output out/inventory.json
+
+On Databricks compute a workspace secret scope also works (--secret-store scope,
+default refs fivetran/api-key and fivetran/api-secret). FIVETRAN_API_KEY and
+FIVETRAN_API_SECRET are used when no secret store is configured.
 
 Secret-looking config values are redacted before anything is written to disk.
 """
@@ -19,8 +24,44 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ftlfc.credentials import SecretError, load_credentials, resolve_source
 from ftlfc.fivetran import FivetranClient, FivetranError
 from ftlfc.inventory import build_inventory
+
+
+def add_credential_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Fivetran credentials")
+    group.add_argument(
+        "--secret-store",
+        choices=("scope", "uc", "unity_catalog"),
+        help="where the API key and secret live (env FIVETRAN_SECRET_STORE)",
+    )
+    group.add_argument(
+        "--api-key-ref",
+        help="catalog.schema.secret for uc, scope/key for scope (env FIVETRAN_API_KEY_REF)",
+    )
+    group.add_argument(
+        "--api-secret-ref",
+        help="catalog.schema.secret for uc, scope/key for scope (env FIVETRAN_API_SECRET_REF)",
+    )
+    group.add_argument(
+        "--databricks-profile",
+        help="CLI profile used to read uc secrets off Databricks compute",
+    )
+
+
+def build_client(args: argparse.Namespace) -> FivetranClient:
+    source = resolve_source(
+        store=args.secret_store,
+        key_ref=args.api_key_ref,
+        secret_ref=args.api_secret_ref,
+        profile=args.databricks_profile,
+    )
+    if source is None:
+        return FivetranClient.from_env()
+    logging.info("reading Fivetran credentials from %s", source.describe())
+    key, secret = load_credentials(source)
+    return FivetranClient(api_key=key, api_secret=secret)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-workers", type=int, default=8, help="parallel schema fetches (default 8)"
     )
     parser.add_argument("-v", "--verbose", action="store_true")
+    add_credential_args(parser)
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -62,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        client = FivetranClient.from_env()
+        client = build_client(args)
         inventory = build_inventory(
             client,
             group_ids=args.groups,
@@ -70,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             include_columns=args.columns,
             max_workers=args.max_workers,
         )
-    except FivetranError as exc:
+    except (FivetranError, SecretError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
