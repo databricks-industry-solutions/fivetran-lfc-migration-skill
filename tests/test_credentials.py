@@ -15,7 +15,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 import fivetran_discover
 import preflight
+from ftlfc import credentials
 from ftlfc.credentials import (
+    STOP_ON_READ_FAILURE,
     CliBackend,
     RuntimeBackend,
     SecretError,
@@ -192,7 +194,10 @@ class TestReadSecret:
         backend = _MapBackend(error=RuntimeError("RESOURCE_DOES_NOT_EXIST: Secret missing"))
         with pytest.raises(SecretError) as info:
             read_secret(ref, backend)
-        assert str(info.value) == "could not read uc secret 'main.fivetran.api_key': not found"
+        assert str(info.value) == (
+            "could not read uc secret 'main.fivetran.api_key': not found\n"
+            "Stop and ask the user to fix this ref; do not look for the secret anywhere else."
+        )
 
     def test_permission_denied_lists_the_grants(self) -> None:
         ref = parse_ref("uc", "main.fivetran.api_key")
@@ -200,11 +205,20 @@ class TestReadSecret:
         with pytest.raises(SecretError, match="permission denied") as info:
             read_secret(ref, backend)
         assert "READ SECRET" in str(info.value) and "USE SCHEMA" in str(info.value)
+        assert str(info.value).endswith(STOP_ON_READ_FAILURE)
 
     def test_empty_value_is_an_error(self) -> None:
         ref = parse_ref("scope", "fivetran/api-key")
-        with pytest.raises(SecretError, match="is empty"):
+        with pytest.raises(SecretError, match="is empty") as info:
             read_secret(ref, _MapBackend({"fivetran/api-key": "  "}))
+        assert str(info.value).endswith(STOP_ON_READ_FAILURE)
+
+    def test_backend_secret_errors_also_say_stop(self) -> None:
+        ref = parse_ref("scope", "fivetran/api-key")
+        with pytest.raises(SecretError, match="only be read on Databricks compute") as info:
+            read_secret(ref, CliBackend(runner=pytest.fail))
+        assert str(info.value).endswith(STOP_ON_READ_FAILURE)
+        assert str(info.value).count(STOP_ON_READ_FAILURE) == 1
 
     def test_failure_does_not_try_other_locations(self) -> None:
         source = resolve_source(store="scope", env={})
@@ -349,6 +363,29 @@ class TestWiring:
         assert code == 1
         assert "'main.fivetran' is malformed" in capsys.readouterr().err
 
+    def test_discovery_read_failure_tells_the_agent_to_stop(
+        self, monkeypatch, capsys, tmp_path
+    ) -> None:
+        backend = _MapBackend(error=RuntimeError("RESOURCE_DOES_NOT_EXIST"))
+        monkeypatch.setattr(credentials, "default_backend", lambda profile: backend)
+        code = fivetran_discover.main(
+            [
+                "--secret-store",
+                "uc",
+                "--api-key-ref",
+                "main.fivetran.api_key",
+                "--api-secret-ref",
+                "main.fivetran.api_secret",
+                "-o",
+                str(tmp_path / "inventory.json"),
+            ]
+        )
+        err = capsys.readouterr().err
+        assert code == 1
+        assert "could not read uc secret 'main.fivetran.api_key': not found" in err
+        assert STOP_ON_READ_FAILURE in err
+        assert backend.reads == ["main.fivetran.api_key"]
+
     def test_preflight_checks_uc_refs_exist_without_reading_them(self) -> None:
         env = {
             "FIVETRAN_SECRET_STORE": "uc",
@@ -378,6 +415,7 @@ class TestWiring:
         assert not ok
         assert "uc secret 'main.fivetran.api_key': not found" in detail
         assert "uc secret 'main.fivetran.api_secret': permission denied" in detail
+        assert detail.endswith(STOP_ON_READ_FAILURE)
         assert backend.reads == []
 
     def test_existence_check_runs_against_the_given_profile(self) -> None:
