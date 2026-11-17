@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ftlfc.credentials import (
+    STOP_ON_READ_FAILURE,
     Backend,
     SecretError,
     check_uc_secrets,
@@ -77,7 +78,7 @@ def check_fivetran_creds(
     if source is not None and source.store == "uc":
         problems = check_uc_secrets(source, backend)
         if problems:
-            return False, "; ".join(problems)
+            return False, f"{'; '.join(problems)}\n{STOP_ON_READ_FAILURE}"
         return True, f"{source.describe()} exist (values read at discovery)"
     if source is not None:
         note = "" if on_databricks(env) else "; scopes can only be read on Databricks compute"

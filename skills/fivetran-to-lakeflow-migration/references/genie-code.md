@@ -90,6 +90,14 @@ never echo them into environment variables or chat. Unity Catalog secrets need
 reads them on serverless environment 4+ or DBR 17.3 LTS+; on older compute
 discovery calls the Unity Catalog secrets API instead.
 
+If a secret read fails, stop. The error names the ref, the store, and the
+reason, and ends with "Stop and ask the user to fix this ref; do not look for
+the secret anywhere else." Your next message reports those three things and
+the fix from the troubleshooting table below, then waits for the user. Do not
+list secret scopes, search catalogs, schemas, or `information_schema`, or try
+any other secret, even to suggest one; re-run discovery only after the user
+fixes the ref or the secret.
+
 ## Orchestration with other migration skills
 
 - **Warehouse assessment/conversion:** `lakehouse-migrator` skills (Vertica, Hive, etc.) — run in parallel; ingestion migration is independent.
@@ -103,8 +111,8 @@ discovery calls the Unity Catalog secrets API instead.
 | `No module named 'yaml'` | `python3 ${SCRIPTS}/preflight.py --install-deps` |
 | Scripts not found | Re-run preflight `--export`; confirm skill uploaded to `.assistant/skills/` |
 | Fivetran 401 | The secret holds a revoked or wrong key; update it in place, or authenticate Fivetran MCP |
-| `could not read uc secret '…': not found` | Check the ref is `catalog.schema.secret` and the secret exists; discovery does not look anywhere else |
-| `could not read … secret '…': permission denied` | Grant `READ SECRET` on the secret and `USE CATALOG` / `USE SCHEMA` on its parents |
+| `could not read uc secret '…': not found` | Stop and ask the user to correct the ref (`catalog.schema.secret`) or create the secret in Catalog Explorer > **Create > Secret**; do not search for it |
+| `could not read … secret '…': permission denied` | Stop and ask the owner to grant `READ SECRET` on the secret and `USE CATALOG` / `USE SCHEMA` on its parents (`READ` on a scope) |
 | `scope secret '…' can only be read on Databricks compute` | Run discovery in Genie Code, or switch to Unity Catalog secrets with `--databricks-profile` |
 | `bundle validate` auth error | `databricks auth login --profile <profile>` |
 | MAR stage fails | Platform Connector missing — use `--print-sql` and `--csv`, or skip it and record the customer's spend with `fivetran_consumption.py spend` |

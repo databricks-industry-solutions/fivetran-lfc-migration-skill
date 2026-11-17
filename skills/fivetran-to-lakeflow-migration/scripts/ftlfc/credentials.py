@@ -7,9 +7,10 @@ Two stores hold the key and secret:
 - ``uc``: a Unity Catalog secret, ref ``catalog.schema.secret``. The reader
   needs READ SECRET on the secret plus USE CATALOG and USE SCHEMA on its parents.
 
-A failed read names the ref, the store, and the reason, and never tries another
-location: quietly picking up a different secret is how a stale key or another
-account's key ends up in a migration. Secret values never appear in errors.
+A failed read names the ref, the store, and the reason, ends with
+``STOP_ON_READ_FAILURE``, and never tries another location: quietly picking up a
+different secret is how a stale key or another account's key ends up in a
+migration. Secret values never appear in errors.
 """
 
 from __future__ import annotations
@@ -30,6 +31,11 @@ except ImportError:
 
 STORE_ALIASES = {"scope": "scope", "uc": "uc", "unity_catalog": "uc"}
 DEFAULT_SCOPE_REFS = ("fivetran/api-key", "fivetran/api-secret")
+# Agents read these errors; without this line they tend to go list scopes or
+# search information_schema for a secret that looks right.
+STOP_ON_READ_FAILURE = (
+    "Stop and ask the user to fix this ref; do not look for the secret anywhere else."
+)
 
 _UC_SECRETS_PATH = "/api/2.1/unity-catalog/secrets"
 _NOT_FOUND_MARKERS = ("RESOURCE_DOES_NOT_EXIST", "NOT_FOUND", "does not exist", "404")
@@ -109,17 +115,21 @@ def failure_reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
 
 
+def _read_failure(message: str) -> SecretError:
+    return SecretError(f"{message}\n{STOP_ON_READ_FAILURE}")
+
+
 def read_secret(ref: SecretRef, backend: Backend) -> str:
     try:
         value = backend.read(ref)
-    except SecretError:
-        raise
+    except SecretError as exc:
+        raise _read_failure(str(exc)) from None
     except Exception as exc:
-        raise SecretError(
+        raise _read_failure(
             f"could not read {ref.store} secret '{ref.ref}': {failure_reason(exc)}"
         ) from None
     if not value or not value.strip():
-        raise SecretError(f"{ref.store} secret '{ref.ref}' is empty")
+        raise _read_failure(f"{ref.store} secret '{ref.ref}' is empty")
     return value.strip()
 
 

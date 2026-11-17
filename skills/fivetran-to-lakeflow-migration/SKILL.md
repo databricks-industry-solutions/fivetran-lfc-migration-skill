@@ -77,8 +77,12 @@ Before stage 1, ask in one message (skip anything the user already named):
 **Credentials.** Fivetran credentials live only in Unity Catalog secrets or a
 workspace secret scope, at the refs the user names. Never ask for, print, or
 store their values, and never look in scopes, schemas, or secrets the user did
-not name; if a read fails, report the error (it names the ref, store, and
-reason) and ask. If the user pastes credentials into chat, do not use, repeat,
+not name. If a read fails, stop: report the ref, store, and reason from the
+error, say how to fix it (correct the ref, create the secret in Catalog
+Explorer, or have the owner grant `USE CATALOG`, `USE SCHEMA`, and
+`READ SECRET`), and wait. Do not list secret scopes, search catalogs, schemas,
+or `information_schema`, or try other secrets; re-run discovery only after the
+user fixes it. If the user pastes credentials into chat, do not use, repeat,
 or write them anywhere. Tell them to store them as Unity Catalog secrets
 (Catalog Explorer, **Create > Secret**) or in a workspace secret scope with
 `databricks secrets put-secret` from their own terminal, and to rotate the

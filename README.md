@@ -141,7 +141,8 @@ and `FIVETRAN_API_SECRET_REF`. Off Databricks compute, Unity Catalog secrets are
 read through the Databricks CLI profile; workspace secret scopes can only be
 read on Databricks compute (see Genie Code below). If a secret cannot be read,
 discovery stops with the ref, the store, and the reason, and does not look
-anywhere else. `preflight.py --profile <profile-name>` with those variables set
+anywhere else; the error tells the agent to ask you to fix the ref rather than
+list scopes or search for another secret. `preflight.py --profile <profile-name>` with those variables set
 checks that each Unity Catalog secret exists and is readable, through a
 metadata-only lookup that never requests the value.
 
