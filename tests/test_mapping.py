@@ -10,6 +10,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import plan_migration
 from ftlfc.catalog import (
     CATALOG,
     COMMUNITY_CONNECTORS_URL,
@@ -836,3 +837,27 @@ class TestConnectionReuse:
             existing_connections={"postgres": "pg_prod"},
         )["items"][0]
         assert item["target"]["effort"] == lookup("postgres").effort.value
+
+
+class TestPlanReport:
+    def _printed(self, plan: dict, capsys: pytest.CaptureFixture) -> str:
+        plan_migration._report(plan, Path("plan.json"))
+        return capsys.readouterr().out
+
+    def test_no_blocker_note_when_every_connection_migrates(self, capsys) -> None:
+        plan = build_plan(_inventory(_connection(objects=[_table()])), "main")
+        out = self._printed(plan, capsys)
+        assert "1 of 1 connections will be generated in the bundle\n" in out
+        assert "the rest have blockers" not in out
+
+    def test_blocker_note_when_some_connections_are_blocked(self, capsys) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(objects=[_table()]),
+                _connection(id="s3_conn", service="s3", objects=[_table()]),
+            ),
+            "main",
+        )
+        assert plan["summary"]["connections_not_migratable"] == 1
+        out = self._printed(plan, capsys)
+        assert "1 of 2 connections will be generated in the bundle (the rest have blockers" in out

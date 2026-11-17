@@ -141,9 +141,12 @@ _EFFORT_LABEL = {
 def _report(plan: dict, destination: Path) -> None:
     summary = plan["summary"]
     print(f"Wrote {destination}")
+    blocked_note = (
+        " (the rest have blockers, listed below)" if summary["connections_not_migratable"] else ""
+    )
     print(
         f"  {summary['connections_migratable']} of {summary['connections_total']} connections "
-        "will be generated in the bundle (the rest have blockers, listed below)"
+        f"will be generated in the bundle{blocked_note}"
     )
     manual = summary.get("connections_manual_sign_in", 0)
     if manual:
