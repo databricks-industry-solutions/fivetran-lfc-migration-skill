@@ -19,6 +19,7 @@ from ftlfc.credentials import (
     CliBackend,
     RuntimeBackend,
     SecretError,
+    check_uc_secrets,
     load_credentials,
     parse_ref,
     read_secret,
@@ -51,16 +52,28 @@ class _DbUtils:
 
 
 class _MapBackend:
-    def __init__(self, values: dict[str, str] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        values: dict[str, str] | None = None,
+        error: Exception | None = None,
+        check_errors: dict[str, Exception] | None = None,
+    ):
         self.values = values or {}
         self.error = error
+        self.check_errors = check_errors or {}
         self.reads: list[str] = []
+        self.checks: list[str] = []
 
     def read(self, ref):
         self.reads.append(ref.ref)
         if self.error is not None:
             raise self.error
         return self.values[ref.ref]
+
+    def check_exists(self, ref):
+        self.checks.append(ref.ref)
+        if ref.ref in self.check_errors:
+            raise self.check_errors[ref.ref]
 
 
 def _runner(returncode: int, stdout: str = "", stderr: str = ""):
@@ -238,6 +251,12 @@ class TestRuntimeBackend:
         assert backend.read(parse_ref("uc", "main.fivetran.api_key")) == FAKE_KEY
         assert paths == ["/api/2.1/unity-catalog/secrets/main.fivetran.api_key"]
 
+    def test_uc_existence_check_uses_the_metadata_path(self) -> None:
+        paths: list[str] = []
+        backend = RuntimeBackend(dbutils=pytest.fail, metadata_get=paths.append)
+        backend.check_exists(parse_ref("uc", "main.fivetran.api_key"))
+        assert paths == ["/api/2.1/unity-catalog/secrets/main.fivetran.api_key"]
+
     def test_rest_error_surfaces_with_its_reason(self) -> None:
         secrets = _Secrets({}, error=TypeError("old runtime"))
 
@@ -272,6 +291,24 @@ class TestCliBackend:
         run = _runner(0, stdout=json.dumps({"full_name": "c.s.k"}))
         with pytest.raises(SecretError, match="returned no value"):
             CliBackend(runner=run).read(parse_ref("uc", "c.s.k"))
+
+    def test_existence_check_never_requests_the_value(self) -> None:
+        run = _runner(0, stdout=json.dumps({"full_name": "main.fivetran.api_key"}))
+        CliBackend("prod", runner=run).check_exists(parse_ref("uc", "main.fivetran.api_key"))
+        command = run.calls[0]
+        assert command[:4] == [
+            "databricks",
+            "api",
+            "get",
+            "/api/2.1/unity-catalog/secrets/main.fivetran.api_key",
+        ]
+        assert not any("include_value" in part for part in command)
+
+    def test_existence_check_surfaces_not_found(self) -> None:
+        run = _runner(1, stderr="Error: Secret 'c.s.k' does not exist.")
+        source = resolve_source(store="uc", key_ref="c.s.k", secret_ref="c.s.v", env={})
+        problems = check_uc_secrets(source, CliBackend(runner=run))
+        assert problems == ["uc secret 'c.s.k': not found", "uc secret 'c.s.v': not found"]
 
     def test_scope_secrets_need_databricks_compute(self) -> None:
         run = _runner(0)
@@ -312,15 +349,53 @@ class TestWiring:
         assert code == 1
         assert "'main.fivetran' is malformed" in capsys.readouterr().err
 
-    def test_preflight_accepts_configured_refs_without_reading_them(self) -> None:
+    def test_preflight_checks_uc_refs_exist_without_reading_them(self) -> None:
         env = {
             "FIVETRAN_SECRET_STORE": "uc",
             "FIVETRAN_API_KEY_REF": "main.fivetran.api_key",
             "FIVETRAN_API_SECRET_REF": "main.fivetran.api_secret",
         }
-        ok, detail = preflight.check_fivetran_creds(env)
+        backend = _MapBackend()
+        ok, detail = preflight.check_fivetran_creds(env, backend=backend)
         assert ok
-        assert "uc secrets main.fivetran.api_key and main.fivetran.api_secret" in detail
+        assert "uc secrets main.fivetran.api_key and main.fivetran.api_secret exist" in detail
+        assert backend.checks == ["main.fivetran.api_key", "main.fivetran.api_secret"]
+        assert backend.reads == []
+
+    def test_preflight_reports_each_missing_or_denied_uc_ref(self) -> None:
+        env = {
+            "FIVETRAN_SECRET_STORE": "uc",
+            "FIVETRAN_API_KEY_REF": "main.fivetran.api_key",
+            "FIVETRAN_API_SECRET_REF": "main.fivetran.api_secret",
+        }
+        backend = _MapBackend(
+            check_errors={
+                "main.fivetran.api_key": RuntimeError("Secret does not exist"),
+                "main.fivetran.api_secret": RuntimeError("PERMISSION_DENIED"),
+            }
+        )
+        ok, detail = preflight.check_fivetran_creds(env, backend=backend)
+        assert not ok
+        assert "uc secret 'main.fivetran.api_key': not found" in detail
+        assert "uc secret 'main.fivetran.api_secret': permission denied" in detail
+        assert backend.reads == []
+
+    def test_existence_check_runs_against_the_given_profile(self) -> None:
+        env = {"FIVETRAN_API_KEY_REF": "c.s.k", "FIVETRAN_API_SECRET_REF": "c.s.v"}
+        source = resolve_source(env=env, profile="staging")
+        run = _runner(0, stdout="{}")
+        assert check_uc_secrets(source, CliBackend(source.profile, runner=run)) == []
+        assert all(command[-2:] == ["--profile", "staging"] for command in run.calls)
+
+    def test_preflight_leaves_scope_refs_unchecked_off_compute(self, monkeypatch) -> None:
+        monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
+        backend = _MapBackend()
+        ok, detail = preflight.check_fivetran_creds(
+            {"FIVETRAN_SECRET_STORE": "scope"}, backend=backend
+        )
+        assert ok
+        assert "not checked" in detail and "only be read on Databricks compute" in detail
+        assert backend.checks == [] and backend.reads == []
 
     def test_preflight_flags_a_malformed_ref(self) -> None:
         ok, detail = preflight.check_fivetran_creds(

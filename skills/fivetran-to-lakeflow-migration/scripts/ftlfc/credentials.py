@@ -63,6 +63,10 @@ class CredentialSource:
 class Backend(Protocol):
     def read(self, ref: SecretRef) -> str: ...
 
+    def check_exists(self, ref: SecretRef) -> None:
+        """Raise if a uc secret is missing or unreadable, without requesting its value."""
+        ...
+
 
 def normalise_store(store: str) -> str:
     try:
@@ -130,6 +134,11 @@ def _effective_value(body: Mapping[str, Any], ref: SecretRef) -> str:
     return value
 
 
+def _require_uc(ref: SecretRef) -> None:
+    if ref.store != "uc":
+        raise SecretError(f"only uc secrets can be checked without reading them, not '{ref.ref}'")
+
+
 def on_databricks(env: Mapping[str, str] | None = None) -> bool:
     env = os.environ if env is None else env
     return bool(env.get("DATABRICKS_RUNTIME_VERSION"))
@@ -142,9 +151,11 @@ class RuntimeBackend:
         self,
         dbutils: Any = None,
         api_get: Callable[[str], Mapping[str, Any]] | None = None,
+        metadata_get: Callable[[str], Mapping[str, Any]] | None = None,
     ) -> None:
         self._dbutils = dbutils
         self._api_get = api_get
+        self._metadata_get = metadata_get
 
     def _secrets(self) -> Any:
         if self._dbutils is None:
@@ -171,6 +182,15 @@ class RuntimeBackend:
         except Exception:
             return _effective_value(self._rest_get(_uc_path(ref)), ref)
 
+    def check_exists(self, ref: SecretRef) -> None:
+        _require_uc(ref)
+        if self._metadata_get is not None:
+            self._metadata_get(_uc_path(ref))
+            return
+        if WorkspaceClient is None:
+            raise SecretError("databricks-sdk is not installed, so uc secrets cannot be checked")
+        WorkspaceClient().api_client.do("GET", _uc_path(ref))
+
 
 class CliBackend:
     """Reads Unity Catalog secrets off Databricks compute through the CLI."""
@@ -186,7 +206,16 @@ class CliBackend:
                 "discovery in Genie Code or a notebook, or store the credentials as Unity "
                 "Catalog secrets and pass --databricks-profile"
             )
-        command = ["databricks", "api", "get", f"{_uc_path(ref)}?include_value=true", "-o", "json"]
+        body = self._get(f"{_uc_path(ref)}?include_value=true", ref)
+        return _effective_value(json.loads(body), ref)
+
+    def check_exists(self, ref: SecretRef) -> None:
+        _require_uc(ref)
+        # Without include_value the response is metadata only; it is discarded anyway.
+        self._get(_uc_path(ref), ref)
+
+    def _get(self, path: str, ref: SecretRef) -> str:
+        command = ["databricks", "api", "get", path, "-o", "json"]
         if self._profile:
             command.extend(["--profile", self._profile])
         try:
@@ -199,7 +228,7 @@ class CliBackend:
             raise SecretError(f"could not read uc secret '{ref.ref}': timed out") from None
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or proc.stdout or "").strip())
-        return _effective_value(json.loads(proc.stdout), ref)
+        return proc.stdout
 
 
 def default_backend(profile: str | None) -> Backend:
@@ -256,6 +285,24 @@ def resolve_source(
         secret_ref=parse_ref(store, secret_ref),
         profile=profile,
     )
+
+
+def check_uc_secrets(source: CredentialSource, backend: Backend | None = None) -> list[str]:
+    """Return one problem per uc ref that is missing or unreadable; empty means both exist.
+
+    Metadata only: never requests a value, so it is safe for preflight. Both refs
+    are checked so one run reports everything that needs fixing.
+    """
+    backend = backend or default_backend(source.profile)
+    problems: list[str] = []
+    for ref in (source.key_ref, source.secret_ref):
+        try:
+            backend.check_exists(ref)
+        except SecretError as exc:
+            problems.append(str(exc))
+        except Exception as exc:
+            problems.append(f"uc secret '{ref.ref}': {failure_reason(exc)}")
+    return problems
 
 
 def load_credentials(source: CredentialSource, backend: Backend | None = None) -> tuple[str, str]:
