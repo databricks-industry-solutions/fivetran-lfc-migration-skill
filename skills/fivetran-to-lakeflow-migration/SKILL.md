@@ -56,6 +56,35 @@ stage 6 runs deliberately. The one exception is the consumption export, which
 copies files to a Unity Catalog volume only when the customer asks for that at
 Gate 1.
 
+## Setup
+
+Before stage 1, ask in one message (skip anything the user already named):
+
+1. **Target catalog** for the migrated tables (`--dest-catalog`; Gate 2 uses
+   `<target_catalog>_dev` for dev unless told otherwise).
+2. **Where the Fivetran API key and secret are stored**: two Unity Catalog
+   secret names (`catalog.schema.secret`), a workspace secret scope and its two
+   keys, or not yet. Pass them to discovery as `--secret-store uc|scope
+   --api-key-ref ... --api-secret-ref ...`.
+3. **Databricks CLI profile** (off Databricks compute only).
+4. **Fivetran group** to limit discovery to, if any.
+5. **SQL Server architecture** (`integrated` or `gateway`), if the estate has
+   SQL Server.
+6. **UC connections to reuse**, if any.
+7. **Current Fivetran spend** (optional): monthly amount, month, whether it is
+   an invoice, contract, or estimate, and MAR if known.
+
+**Credentials.** Fivetran credentials live only in Unity Catalog secrets or a
+workspace secret scope, at the refs the user names. Never ask for, print, or
+store their values, and never look in scopes, schemas, or secrets the user did
+not name; if a read fails, report the error (it names the ref, store, and
+reason) and ask. If the user pastes credentials into chat, do not use, repeat,
+or write them anywhere. Tell them to store them as Unity Catalog secrets
+(Catalog Explorer, **Create > Secret**) or in a workspace secret scope with
+`databricks secrets put-secret` from their own terminal, and to rotate the
+pasted key in Fivetran (Account Settings > API Config), because the chat
+history keeps it.
+
 ## Review gates
 
 There are two mandatory gates. At each one the agent **must stop, present the
@@ -66,23 +95,30 @@ even if there are no blockers.
 
 Present the following to the customer before any bundle is generated:
 
-1. **Estate summary** — connection count, table count, sources by category
-   (SaaS, database CDC, file, streaming, federation, blocked).
-2. **Effort breakdown** — how many connections are low / medium / high / blocked,
-   and what makes each high or blocked.
+1. **Estate summary** — connection count, migratable and not migratable
+   connections, table count, sources by category (SaaS, database CDC, file,
+   streaming, federation, none).
+2. **Effort breakdown** — how many connections are low / medium / high /
+   no_managed_connector, and what makes each high.
 3. **Blockers** — every blocker from `plan.json`, with the connection name and
-   the concrete obstacle. If any connection is `blocked`, explain the
-   `alternative` field (Auto Loader, federation, streaming source).
-4. **Warnings** — hashed columns, private networking, browser-only OAuth,
+   the concrete obstacle. For a `no_managed_connector` connection, present its
+   `alternative` (a Lakeflow Community Connector, Auto Loader, federation, or a
+   streaming source) as another path, not a dead end.
+4. **Tables** — for connectors with a fixed Lakeflow Connect table list
+   (`table_plan` in `plan.json`), account for every table Fivetran syncs: how
+   many pair with a Lakeflow Connect table (and which are renamed), which have
+   no equivalent, which are disabled in Fivetran, and which Lakeflow Connect
+   tables are ingested though no Fivetran table pairs with them.
+5. **Warnings** — hashed columns, private networking, browser-only OAuth,
    connectors not yet GA, and database tables Fivetran confirms have no
    primary key. Present Beta / Public Preview notes as something to confirm
    in the target workspace, never as a finding that the connector is off:
    the planner cannot see the workspace.
-5. **Fivetran consumption and spend** — the `fivetran_spend` and
+6. **Fivetran consumption and spend** — the `fivetran_spend` and
    `fivetran_consumption` sections printed by stage 4. These are recorded
    figures, not estimates; if both are empty, say no Fivetran consumption or
    spend was recorded.
-6. **Recommendation** — which connections to migrate first (lowest effort,
+7. **Recommendation** — which connections to migrate first (lowest effort,
    highest MAR), which to defer, and which need a different architecture.
 
 **Wait here** and ask two questions:
@@ -105,11 +141,14 @@ Present the generated bundle for review before any deployment:
 
 1. **Bundle contents** — list of pipelines, jobs, and connections that will be
    created, with their target schemas and tables.
-2. **Excluded connections** — anything blocked or out of scope, and why.
-3. **Manual steps required** — which UC connections need browser-based OAuth
+2. **Excluded connections** — anything not migratable or out of scope, why,
+   and its other path.
+3. **Renamed tables** — listed under "Renamed tables" in the bundle README;
+   downstream references must move to the Lakeflow Connect name.
+4. **Manual steps required** — which UC connections need browser-based OAuth
    (listed under "Manual connections" in the bundle README and marked `MANUAL`
    in `create_connections.sh`), which source systems need admin setup.
-4. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
+5. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
    equivalents.
 
 **Wait here.** The customer may want to:
@@ -168,9 +207,28 @@ Fivetran MCP read tools when configured. Read-only; secret-looking config values
 are redacted before anything is written to disk.
 
 ```bash
-export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
-python3 ${SCRIPTS}/fivetran_discover.py -o ${FTLFC_OUT}/inventory.json
+# Unity Catalog secrets (needs READ SECRET, USE CATALOG, USE SCHEMA)
+python3 ${SCRIPTS}/fivetran_discover.py --secret-store uc \
+  --api-key-ref <catalog>.<schema>.<key_secret> \
+  --api-secret-ref <catalog>.<schema>.<secret_secret> \
+  -o ${FTLFC_OUT}/inventory.json
+
+# Workspace secret scope (Databricks compute only; defaults fivetran/api-key, fivetran/api-secret)
+python3 ${SCRIPTS}/fivetran_discover.py --secret-store scope -o ${FTLFC_OUT}/inventory.json
 ```
+
+Off Databricks compute, add `--databricks-profile <profile>` so Unity Catalog
+secrets are read through the CLI; workspace scopes cannot be read there.
+Preflight (`preflight.py --profile <profile>` with `FIVETRAN_SECRET_STORE=uc`
+and the two ref variables) confirms each Unity Catalog secret exists and is
+readable through a metadata-only lookup that never requests the value, and
+reports not found or permission denied per ref. Scope refs are checked for
+configuration only. With
+no secret store configured, discovery falls back to `FIVETRAN_API_KEY` /
+`FIVETRAN_API_SECRET` if set. Reading Unity Catalog secrets with `dbutils`
+needs serverless environment 4+ or DBR 17.3 LTS+; older compute uses the
+Unity Catalog secrets API instead. Note that SQL `secret()` reads workspace
+scopes only.
 
 `--columns` is optional and not needed for planning. It fetches every
 column per table (one rate-limited request each) and only adds primary keys
@@ -182,8 +240,7 @@ come back without it.
 **Fivetran MCP path:** use `fivetran_list_groups`, `fivetran_list_connections_in_group`,
 and `fivetran_get_connection_schema_config`, then assemble `inventory.json`
 (`fivetran_get_connection_column_config` is the `--columns` equivalent, and
-likewise not needed), or run `fivetran_discover.py` after exporting
-API credentials.
+likewise not needed), or run `fivetran_discover.py` with the secret refs.
 
 ## Stage 2: Measure (Assessment)
 
@@ -314,7 +371,7 @@ matters is not "supported" but *who has to do the work*:
 | `low` | Fully automatable end to end | Yes |
 | `medium` | Connection is scriptable once a source-system admin does setup and supplies credentials (Salesforce mTLS, ServiceNow ROPC, Workday, NetSuite, GA4 service account) | Yes |
 | `high` | The UC connection needs a one-time interactive browser sign-in (browser-OAuth-only connectors) | Yes; the connection is a manual checklist step |
-| `blocked` | No managed connector; needs a different architecture | No |
+| `no_managed_connector` | No managed connector; the plan's `alternative` names another path (a Lakeflow Community Connector, Auto Loader, federation) | No |
 
 Source-admin work alone never makes a connection `high`. Where a connector
 offers both browser OAuth and a non-interactive path, the plan's
@@ -363,10 +420,24 @@ mean:
   the raw value will land in the bronze table.
 - **Private networking.** Fivetran's SSH tunnel or PrivateLink setup does not
   carry over. Databricks-side network access must be designed separately.
-- **No managed connector.** Check the `alternative` field. Object storage goes
-  to Auto Loader, message buses to a streaming source, warehouses to
-  federation. A blocker means a different architecture, not necessarily that
-  the source cannot move.
+- **No managed connector.** Check the `alternative` field and present it as
+  another path, not a dead end. Object storage goes to Auto Loader, message
+  buses to a streaming source, warehouses to federation, and other sources
+  may have a [Lakeflow Community Connector](https://docs.databricks.com/aws/en/ingestion/community-connectors)
+  (Beta, open source,
+  [databrickslabs/lakeflow-community-connectors](https://github.com/databrickslabs/lakeflow-community-connectors)).
+- **Fixed table lists.** For connectors with `supported_tables` in the
+  catalog, the plan starts from the Lakeflow Connect list and pairs each table
+  with the Fivetran table whose name matches after ignoring case, underscores,
+  and plural endings. Each row in `table_plan` has a `status`: `same_name`,
+  `renamed` (Fivetran `incident` becomes `incidents`), `lakeflow_only` (no
+  Fivetran table pairs; still ingested, so remove any the customer does not
+  need), `disabled_in_fivetran` (not ingested), or `not_available` (enabled in
+  Fivetran, no Lakeflow Connect equivalent; not migrated). A connection where
+  nothing pairs is blocked, with the list the connector does offer.
+- **Renamed tables.** A renamed table lands under its Lakeflow Connect name,
+  not Fivetran's, so views, models, and dashboards that reference the Fivetran
+  name need repointing; check column names against the landed table too.
 
 Two connectors are never faithful one-to-one migrations, and both need saying
 out loud early:
@@ -430,8 +501,18 @@ data.
 ```bash
 python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
   -o ${FTLFC_OUT}/bundle --name <customer>-lfc \
-  --host https://<workspace>.cloud.databricks.com
+  --host https://<workspace>.cloud.databricks.com \
+  --dev-catalog <dev_catalog> --databricks-profile <profile>
 ```
+
+`--dev-catalog` sets the catalog the `dev` target writes to (default
+`<target_catalog>_dev`). With `--databricks-profile`, the generator checks
+read-only (`databricks catalogs get`) that the dev and prod catalogs exist and
+warns, without failing, when one does not; the bundle README records the result.
+The bundle never creates catalogs. The `prod` target sets `workspace.root_path`
+to the deploying user's `.bundle` folder, which `mode: production` requires; for
+a team-owned deployment switch it to `/Workspace/Shared/...` and add a `run_as`
+service principal (see `references/bundles.md`).
 
 Produces a bundle the customer keeps in their own repo: one ingestion pipeline
 per connection, a gateway pipeline where gateway-based CDC needs one, and a
@@ -445,7 +526,9 @@ Unity Catalog connections are *not* bundle resources, because credentials must
 not be committed. They are emitted as `scripts/create_connections.sh` with
 `REPLACE_ME` placeholders, to be run once before deploying.
 
-Review the generated YAML against the plan before deploying. Connections that
+Review the generated YAML against the plan before deploying. The bundle README
+lists renamed tables and Lakeflow Connect-only tables (ingested but with no
+Fivetran counterpart) so downstream references can be updated. Connections that
 had blockers (no managed connector) are absent from the bundle by design and
 listed in its README. Browser-OAuth connections are present; create each one
 in Catalog Explorer with the exact name in the README before deploying.
@@ -482,8 +565,9 @@ Then the customer cuts over in this order (do not compress it):
 After preflight exports `${SCRIPTS}` and `${FTLFC_OUT}`:
 
 ```bash
-export FIVETRAN_API_KEY=... FIVETRAN_API_SECRET=...
 python3 ${SCRIPTS}/fivetran_discover.py -g <group_id> \
+  --secret-store uc --api-key-ref <catalog>.<schema>.<key_secret> \
+  --api-secret-ref <catalog>.<schema>.<secret_secret> \
   -o ${FTLFC_OUT}/inventory.json
 python3 ${SCRIPTS}/fivetran_mar.py --warehouse-id <id> --profile <profile> \
   -o ${FTLFC_OUT}/mar.json

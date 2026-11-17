@@ -131,16 +131,22 @@ _EFFORT_LABEL = {
     "low": "fully automatable",
     "medium": "automatable after source-side admin work and customer-supplied credentials",
     "high": "connection needs a one-time browser sign-in; pipeline still generated",
-    "blocked": "no managed connector",
+    "no_managed_connector": (
+        "no managed connector; see the alternative (a Lakeflow Community Connector, "
+        "Auto Loader, or federation)"
+    ),
 }
 
 
 def _report(plan: dict, destination: Path) -> None:
     summary = plan["summary"]
     print(f"Wrote {destination}")
+    blocked_note = (
+        " (the rest have blockers, listed below)" if summary["connections_not_migratable"] else ""
+    )
     print(
         f"  {summary['connections_migratable']} of {summary['connections_total']} connections "
-        "will be generated in the bundle (the rest have blockers, listed below)"
+        f"will be generated in the bundle{blocked_note}"
     )
     manual = summary.get("connections_manual_sign_in", 0)
     if manual:
@@ -149,6 +155,17 @@ def _report(plan: dict, destination: Path) -> None:
     if reused:
         print(f"  {reused} reuse an existing UC connection")
     print(f"  {summary['tables_total']} tables ({summary['tables_scd2']} needing SCD type 2)")
+    if summary.get("tables_renamed") or summary.get("tables_lakeflow_only"):
+        print(
+            f"    {summary['tables_paired']} paired with a Fivetran table "
+            f"({summary['tables_renamed']} renamed), {summary['tables_lakeflow_only']} "
+            "Lakeflow Connect only"
+        )
+    if summary.get("tables_not_available"):
+        print(
+            f"  {summary['tables_not_available']} Fivetran table(s) have no Lakeflow Connect "
+            "equivalent and are not migrated"
+        )
     print(
         f"  {summary['jobs_required']} jobs and {summary['gateways_required']} gateways to create "
         "alongside the pipelines"
@@ -162,7 +179,7 @@ def _report(plan: dict, destination: Path) -> None:
 
     if summary["by_effort"]:
         print("  effort breakdown:")
-        for effort in ("low", "medium", "high", "blocked"):
+        for effort in ("low", "medium", "high", "no_managed_connector"):
             count = summary["by_effort"].get(effort)
             if count:
                 print(f"    {count} {_EFFORT_LABEL[effort]}")

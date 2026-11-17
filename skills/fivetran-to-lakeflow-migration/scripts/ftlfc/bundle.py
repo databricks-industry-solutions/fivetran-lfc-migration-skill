@@ -32,6 +32,13 @@ import yaml
 GATEWAY_DRIVER_NODE = "r5n.16xlarge"
 GATEWAY_WORKER_NODE = "m5n.large"
 
+# mode: production refuses to validate without an explicit root_path. A per-user
+# path works with no extra setup; a shared path also needs a run_as service
+# principal so table ownership does not follow whoever deployed last.
+PROD_ROOT_PATH = (
+    "/Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}"
+)
+
 _MANUAL_CONNECTION_NOTE = (
     "MANUAL. This connector uses browser-based OAuth only, so no script can create its "
     "connection. Create it once in Catalog Explorer (Catalog > External data > "
@@ -51,16 +58,27 @@ def dump_yaml(document: dict[str, Any]) -> str:
     return yaml.dump(document, Dumper=_Dumper, sort_keys=False, width=100, allow_unicode=True)
 
 
+def dev_catalog_for(plan: dict[str, Any], dev_catalog: str | None = None) -> str:
+    return dev_catalog or f"{plan['target_catalog']}_dev"
+
+
 def build_bundle(
     plan: dict[str, Any],
     bundle_name: str,
     host: str | None = None,
     notification_email: str | None = None,
+    dev_catalog: str | None = None,
+    catalog_exists: dict[str, bool | None] | None = None,
 ) -> dict[str, str]:
-    """Render a complete bundle as a mapping of relative path -> file contents."""
+    """Render a complete bundle as a mapping of relative path -> file contents.
+
+    ``catalog_exists`` maps a catalog name to True or False when the workspace was
+    checked, or None when the check could not run; it only feeds the README.
+    """
     migratable = [i for i in plan["items"] if not i["blockers"]]
+    dev_catalog = dev_catalog_for(plan, dev_catalog)
     files: dict[str, str] = {
-        "databricks.yml": dump_yaml(_root(plan, bundle_name, host)),
+        "databricks.yml": dump_yaml(_root(plan, bundle_name, host, dev_catalog)),
     }
 
     for item in migratable:
@@ -74,20 +92,36 @@ def build_bundle(
         files[f"resources/{key}.pipeline.yml"] = dump_yaml(_pipeline(item, notification_email))
         files[f"resources/{key}.job.yml"] = dump_yaml(_job(item, notification_email))
 
-    files["scripts/create_connections.sh"] = _connection_script(plan)
-    files["README.md"] = _bundle_readme(plan, bundle_name)
+    script = _connection_script(plan)
+    files["scripts/create_connections.sh"] = script
+    files["README.md"] = _bundle_readme(
+        plan,
+        bundle_name,
+        dev_catalog=dev_catalog,
+        catalog_exists=catalog_exists or {},
+        has_placeholders=any(
+            "REPLACE_ME" in line for line in script.splitlines() if not line.startswith("#")
+        ),
+    )
     return files
 
 
-def _root(plan: dict[str, Any], bundle_name: str, host: str | None) -> dict[str, Any]:
+def _root(
+    plan: dict[str, Any], bundle_name: str, host: str | None, dev_catalog: str
+) -> dict[str, Any]:
     catalog = plan["target_catalog"]
 
     def target(mode: str, dest_catalog: str, **extra: Any) -> dict[str, Any]:
         # Built fresh per target: sharing one dict makes PyYAML emit an anchor
         # and an alias, which is valid but confusing in a file humans review.
         spec: dict[str, Any] = {"mode": mode, **extra}
+        workspace: dict[str, str] = {}
         if host:
-            spec["workspace"] = {"host": host}
+            workspace["host"] = host
+        if mode == "production":
+            workspace["root_path"] = PROD_ROOT_PATH
+        if workspace:
+            spec["workspace"] = workspace
         spec["variables"] = {"dest_catalog": dest_catalog}
         return spec
 
@@ -111,7 +145,7 @@ def _root(plan: dict[str, Any], bundle_name: str, host: str | None) -> dict[str,
         "targets": {
             # Development mode prefixes resource names and pauses schedules, so
             # a dev deploy cannot compete with production for the same source.
-            "dev": target("development", f"{catalog}_dev", default=True),
+            "dev": target("development", dev_catalog, default=True),
             "prod": target("production", catalog),
         },
     }
@@ -194,33 +228,11 @@ def _ingestion_definition(item: dict[str, Any], needs_gateway: bool, key: str) -
     if is_integrated_cdc:
         definition["connector_type"] = "CDC"
 
-    # For managed SaaS connectors whose supported-table set is cataloged, omit
-    # the explicit objects list and let the connector auto-discover its tables
-    # from the source.  This avoids runtime failures from Fivetran tables that
-    # the Lakeflow connector doesn't support, and picks up any new tables the
-    # connector adds in the future.  The plan still reports which Fivetran
-    # tables have no Lakeflow equivalent.
-    #
-    # Database CDC and gateway sources keep the explicit list because their
-    # tables are user-defined and the plan's filtering does not apply.
-    if (
-        target.get("category") == "saas_managed"
-        and target.get("has_supported_tables")
-        and not needs_gateway
-    ):
-        definition["objects"] = [
-            {
-                "schema": {
-                    "source_schema": item["objects"][0]["source_schema"]
-                    if item["objects"]
-                    else "default",
-                    "destination_catalog": "${var.dest_catalog}",
-                    "destination_schema": target["destination_schema"],
-                }
-            }
-        ]
-    else:
-        definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
+    # Always table objects, never a schema object: a schema object would also
+    # ingest tables the customer turned off in Fivetran, and schema-level
+    # ingestion is not documented for every connector. For connectors with a
+    # supported-table list, source_table is already the Lakeflow Connect name.
+    definition["objects"] = [_object_spec(o, target) for o in item["objects"]]
 
     # Integrated CDC stages extracted change data through a UC volume. Naming the
     # catalog/schema keeps it in the bundle's staging location; the pipeline
@@ -466,8 +478,28 @@ def _connection_options(connection_type: str, preferred_auth: str | None = None)
     )
 
 
-def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
+def _catalog_note(name: str, target: str, exists: bool | None) -> str:
+    if exists is True:
+        status = "confirmed in the workspace"
+    elif exists is False:
+        status = "**not found in the workspace**; create it before the first deploy"
+    else:
+        status = (
+            "not checked; regenerate with `--databricks-profile` to check, or run "
+            f"`databricks catalogs get {name}`"
+        )
+    return f"  - `{name}` ({target}): {status}"
+
+
+def _bundle_readme(
+    plan: dict[str, Any],
+    bundle_name: str,
+    dev_catalog: str,
+    catalog_exists: dict[str, bool | None],
+    has_placeholders: bool,
+) -> str:
     summary = plan["summary"]
+    prod_catalog = plan["target_catalog"]
     migratable = [i for i in plan["items"] if not i["blockers"]]
     blocked = [i for i in plan["items"] if i["blockers"]]
     reused = [i for i in migratable if i["target"].get("connection_source") == "existing"]
@@ -508,7 +540,23 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
         "",
         "## Before you deploy",
         "",
-        "- Fill in every `REPLACE_ME` in `scripts/create_connections.sh`.",
+    ]
+    if has_placeholders:
+        lines.append("- Fill in every `REPLACE_ME` in `scripts/create_connections.sh`.")
+    lines += [
+        (
+            "- Both destination catalogs must exist; the bundle does not create them. "
+            "Regenerate with `--dev-catalog` to point dev somewhere else."
+        ),
+        _catalog_note(dev_catalog, "dev", catalog_exists.get(dev_catalog)),
+        _catalog_note(prod_catalog, "prod", catalog_exists.get(prod_catalog)),
+        (
+            "- The prod target deploys under the deploying user's home folder "
+            "(`workspace.root_path`), which `mode: production` requires. For a team-owned "
+            "deployment, switch it to `/Workspace/Shared/.bundle/${bundle.name}/${bundle.target}` "
+            "and set `run_as.service_principal_name`, so table ownership does not follow "
+            "whoever deployed last."
+        ),
         (
             "- A pipeline fails if a destination table already exists, so deploy into a clean "
             "schema or set `destination_table` explicitly."
@@ -577,14 +625,65 @@ def _bundle_readme(plan: dict[str, Any], bundle_name: str) -> str:
                 f"`{item['fivetran']['connection_id']}` |"
             )
 
+    renamed = [
+        (item, obj)
+        for item in migratable
+        for obj in item["objects"]
+        if obj.get("status") == "renamed"
+    ]
+    if renamed:
+        lines += [
+            "",
+            "## Renamed tables",
+            "",
+            (
+                "These tables land under the Lakeflow Connect name, not Fivetran's. Repoint "
+                "downstream references and check column names against the landed table."
+            ),
+            "",
+            "| Fivetran table | Lakeflow Connect table | Pipeline |",
+            "|---|---|---|",
+        ]
+        for item, obj in renamed:
+            lines.append(
+                f"| `{obj['fivetran_table']}` | `{obj['destination_schema']}."
+                f"{obj['destination_table']}` | `{item['target']['pipeline_name']}` |"
+            )
+
+    lakeflow_only = [
+        (item, obj)
+        for item in migratable
+        for obj in item["objects"]
+        if obj.get("status") == "lakeflow_only"
+    ]
+    if lakeflow_only:
+        lines += [
+            "",
+            "## Lakeflow Connect-only tables",
+            "",
+            (
+                "These tables match no table Fivetran synced, so they are new to downstream "
+                "consumers. Remove any you do not need from the pipeline before deploying."
+            ),
+            "",
+            "| Lakeflow Connect table | Pipeline |",
+            "|---|---|",
+        ]
+        for item, obj in lakeflow_only:
+            lines.append(
+                f"| `{obj['destination_schema']}.{obj['destination_table']}` | "
+                f"`{item['target']['pipeline_name']}` |"
+            )
+
     if blocked:
         lines += [
             "",
             "## Not included",
             "",
             (
-                "These Fivetran connections have no managed Lakeflow Connect connector and are "
-                "absent from this bundle:"
+                "These Fivetran connections are absent from this bundle. The reason below "
+                "comes with another path where one exists (a Lakeflow Community Connector, "
+                "Auto Loader, federation, or keeping the connection on Fivetran):"
             ),
             "",
         ]

@@ -19,7 +19,18 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ftlfc.credentials import (
+    Backend,
+    SecretError,
+    check_uc_secrets,
+    on_databricks,
+    resolve_source,
+)
 
 
 def resolve_skill_dir(explicit: str | None) -> Path:
@@ -48,12 +59,36 @@ def check_pyyaml() -> tuple[bool, str]:
         return False, f"pip install failed: {tail}"
 
 
-def check_fivetran_creds() -> tuple[bool, str]:
-    key = os.environ.get("FIVETRAN_API_KEY")
-    secret = os.environ.get("FIVETRAN_API_SECRET")
-    if key and secret:
+def check_fivetran_creds(
+    env: Mapping[str, str] | None = None,
+    profile: str | None = None,
+    backend: Backend | None = None,
+) -> tuple[bool, str]:
+    """Check where credentials are configured without reading any secret value.
+
+    For uc secrets this also confirms each one exists and is readable, through a
+    metadata-only lookup. Scope secrets are checked for configuration only.
+    """
+    env = os.environ if env is None else env
+    try:
+        source = resolve_source(env=env, profile=profile)
+    except SecretError as exc:
+        return False, str(exc)
+    if source is not None and source.store == "uc":
+        problems = check_uc_secrets(source, backend)
+        if problems:
+            return False, "; ".join(problems)
+        return True, f"{source.describe()} exist (values read at discovery)"
+    if source is not None:
+        note = "" if on_databricks(env) else "; scopes can only be read on Databricks compute"
+        return True, f"{source.describe()} configured, not checked (read at discovery{note})"
+    if env.get("FIVETRAN_API_KEY") and env.get("FIVETRAN_API_SECRET"):
         return True, "env vars set"
-    return False, "set FIVETRAN_API_KEY and FIVETRAN_API_SECRET (or use Fivetran MCP)"
+    return False, (
+        "set FIVETRAN_SECRET_STORE with FIVETRAN_API_KEY_REF and FIVETRAN_API_SECRET_REF "
+        "(or pass --secret-store and the ref flags to discovery), set FIVETRAN_API_KEY "
+        "and FIVETRAN_API_SECRET, or use Fivetran MCP"
+    )
 
 
 def check_databricks_cli(profile: str | None) -> tuple[bool, str]:
@@ -88,7 +123,7 @@ def build_result(
             "detail": "present" if ok else "missing — run preflight with --install-deps",
         }
 
-    ft_ok, ft_detail = check_fivetran_creds()
+    ft_ok, ft_detail = check_fivetran_creds(profile=profile)
     checks["fivetran_credentials"] = {"ok": ft_ok, "detail": ft_detail}
 
     db_ok, db_detail = check_databricks_cli(profile)

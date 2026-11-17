@@ -6,7 +6,8 @@ mutate a customer's Fivetran account. In particular it never calls
 change which tables are selected.
 
 Auth uses HTTP Basic with the API key as username and API secret as password,
-read from FIVETRAN_API_KEY / FIVETRAN_API_SECRET.
+read from Databricks secrets (see ``ftlfc.credentials``) or from
+FIVETRAN_API_KEY / FIVETRAN_API_SECRET.
 """
 
 from __future__ import annotations
@@ -108,8 +109,8 @@ def _accept_for(path: str) -> str:
 
 @dataclass
 class FivetranClient:
-    api_key: str
-    api_secret: str
+    api_key: str = field(repr=False)
+    api_secret: str = field(repr=False)
     base_url: str = BASE_URL
     timeout: float = 60.0
     max_attempts: int = MAX_ATTEMPTS
@@ -125,8 +126,12 @@ class FivetranClient:
         secret = os.environ.get("FIVETRAN_API_SECRET", "").strip()
         if not key or not secret:
             raise FivetranAuthError(
-                "Set FIVETRAN_API_KEY and FIVETRAN_API_SECRET. Create a key in the "
-                "Fivetran dashboard under Account Settings > API Config."
+                "No Fivetran credentials. Store the API key and secret as Unity Catalog "
+                "secrets (--secret-store uc --api-key-ref catalog.schema.secret "
+                "--api-secret-ref catalog.schema.secret) or in a workspace secret scope "
+                "(--secret-store scope, default refs fivetran/api-key and "
+                "fivetran/api-secret), or set FIVETRAN_API_KEY and FIVETRAN_API_SECRET. "
+                "Create a key in the Fivetran dashboard under Account Settings > API Config."
             )
         return cls(api_key=key, api_secret=secret, **kwargs)
 

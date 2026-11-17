@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import PLAN_SCHEMA_VERSION
@@ -48,6 +49,14 @@ CONTINUOUS_THRESHOLD_MINUTES = 5
 
 DEFAULT_SYNC_MINUTES = 360
 
+#: Table statuses the generated pipeline ingests. ``disabled_in_fivetran`` and
+#: ``not_available`` are reported but never ingested.
+KEPT_STATUSES = frozenset({"same_name", "renamed", "lakeflow_only"})
+PAIRED_STATUSES = frozenset({"same_name", "renamed"})
+
+# Long table lists are cut to this many names, then "and N more".
+_LIST_LIMIT = 10
+
 _INVALID_NAME = re.compile(r"[^a-z0-9_]+")
 
 
@@ -56,6 +65,86 @@ def to_identifier(*parts: str) -> str:
     joined = "_".join(p for p in parts if p)
     cleaned = _INVALID_NAME.sub("_", joined.lower()).strip("_")
     return re.sub(r"_{2,}", "_", cleaned) or "unnamed"
+
+
+def name_key(table: str) -> str:
+    """Normalise a table name so Fivetran's and Lakeflow Connect's spellings meet.
+
+    Case and underscores are ignored, then a trailing ``ies`` becomes ``y`` and a
+    trailing ``s`` is dropped, so ``incident`` meets ``incidents``,
+    ``escalation_policy`` meets ``escalation_policies``, and ``on_call`` meets
+    ``oncalls``.
+    """
+    key = table.lower().replace("_", "")
+    key = re.sub(r"ies$", "y", key)
+    return re.sub(r"s$", "", key)
+
+
+def pair_tables(
+    tables: list[dict[str, Any]], supported: frozenset[str] | None
+) -> list[dict[str, Any]]:
+    """Plan one connection's tables: one row per table, each with a ``status``.
+
+    Without a supported-table list, every enabled Fivetran table is ``same_name``.
+    With one, the plan starts from the Lakeflow Connect list, so a Fivetran name
+    that differs can only add a table, never drop it. Each Lakeflow Connect table
+    pairs with the Fivetran table sharing its ``name_key``: ``same_name`` or
+    ``renamed`` when that table is enabled, ``disabled_in_fivetran`` when the
+    customer turned it off, ``lakeflow_only`` when nothing pairs. Enabled Fivetran
+    tables left unpaired are ``not_available``.
+    """
+    if supported is None:
+        return [
+            {"lakeflow_table": t.get("source_table"), "fivetran": t, "status": "same_name"}
+            for t in tables
+            if t.get("enabled")
+        ]
+
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for table in tables:
+        by_key.setdefault(name_key(table.get("source_table") or ""), []).append(table)
+
+    rows: list[dict[str, Any]] = []
+    chosen: set[int] = set()
+    for lakeflow_table in sorted(t.lower() for t in supported):
+        match = _best_match(by_key.get(name_key(lakeflow_table), []), lakeflow_table)
+        if match is None:
+            status = "lakeflow_only"
+        else:
+            chosen.add(id(match))
+            if not match.get("enabled"):
+                status = "disabled_in_fivetran"
+            elif (match.get("source_table") or "").lower() == lakeflow_table:
+                status = "same_name"
+            else:
+                status = "renamed"
+        rows.append({"lakeflow_table": lakeflow_table, "fivetran": match, "status": status})
+
+    rows.extend(
+        {"lakeflow_table": None, "fivetran": t, "status": "not_available"}
+        for t in tables
+        if t.get("enabled") and id(t) not in chosen
+    )
+    return rows
+
+
+def _best_match(candidates: list[dict[str, Any]], lakeflow_table: str) -> dict[str, Any] | None:
+    """Enabled tables first, then an exact name match, then by name."""
+    return min(
+        candidates,
+        key=lambda t: (
+            not t.get("enabled"),
+            (t.get("source_table") or "").lower() != lakeflow_table,
+            t.get("source_table") or "",
+        ),
+        default=None,
+    )
+
+
+def _sample(names: list[str]) -> str:
+    shown = ", ".join(names[:_LIST_LIMIT])
+    more = len(names) - _LIST_LIMIT
+    return f"{shown} and {more} more" if more > 0 else shown
 
 
 #: Looks up a UC connection by name; returns its info, or None if it does not exist.
@@ -193,18 +282,21 @@ def _plan_connection(
     reused_name = reuse.name_for(connection) if target.has_managed_connector else None
     verified, reuse_blocker = reuse.check(reused_name, target) if reused_name else (False, None)
 
-    objects, obj_warnings = _plan_objects(connection, target, target_catalog)
+    tables = _plan_objects(connection, target, target_catalog)
+    objects = tables.objects
     schedule = _plan_schedule(connection)
     blockers, warnings = _assess(
         connection,
         target,
-        objects,
         schedule,
         reused_name=reused_name,
         verified=verified,
         checked=reuse.can_check,
         use_integrated=use_integrated,
     )
+    if tables.blocker:
+        blockers.append(tables.blocker)
+        objects = []
     if reuse_blocker:
         blockers.append(reuse_blocker)
 
@@ -240,10 +332,12 @@ def _plan_connection(
             "has_supported_tables": target.supported_tables is not None,
         },
         "objects": objects,
+        "table_counts": tables.counts,
+        "table_plan": tables.plan,
         "schedule": schedule,
         "prerequisites": _prerequisites(target, effective_gateway, use_integrated),
         "blockers": blockers,
-        "warnings": warnings + obj_warnings,
+        "warnings": warnings + tables.warnings,
     }
 
 
@@ -267,7 +361,7 @@ def _effort(target: Target, reused: bool) -> Effort:
     a browser sign-in (never the case for databases today) is discounted.
     """
     effort = target.effort
-    if not reused or effort is Effort.BLOCKED:
+    if not reused or effort is Effort.NO_MANAGED_CONNECTOR:
         return effort
     if target.category is Category.SAAS:
         return Effort.LOW
@@ -276,18 +370,28 @@ def _effort(target: Target, reused: bool) -> Effort:
     return effort
 
 
+@dataclass
+class _TablePlan:
+    objects: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    blocker: str | None = None
+    counts: dict[str, int] = field(default_factory=dict)
+    #: Every row with its status, for connectors with a supported-table list.
+    plan: list[dict[str, Any]] | None = None
+
+
 def _plan_objects(
     connection: dict[str, Any], target: Target, target_catalog: str
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Translate enabled Fivetran tables into Lakeflow object specs.
+) -> _TablePlan:
+    """Translate the connection's tables into Lakeflow object specs.
 
-    When the target has a ``supported_tables`` set, only tables in that set are
-    emitted.  Fivetran tables absent from the set are excluded and a warning is
-    generated so the plan clearly reports the coverage gap.
+    Tables are paired with the connector's supported-table list first (see
+    ``pair_tables``), so ``source_table`` is always the Lakeflow Connect name.
+    A connection where no table pairs is blocked: there is nothing to migrate.
     """
-    warnings: list[str] = []
+    result = _TablePlan()
     if not target.has_managed_connector:
-        return [], warnings
+        return result
 
     destination_schema = to_identifier(
         connection.get("destination_schema") or connection.get("service")
@@ -295,24 +399,22 @@ def _plan_objects(
     # The source database is required as source_catalog for integrated CDC, and
     # is a valid (optional) field for the gateway-based ingestion pipeline too.
     source_catalog = (connection.get("config") or {}).get("database") or None
-    specs: list[dict[str, Any]] = []
-    dropped: list[str] = []
+    tables = connection.get("objects", [])
+    rows = pair_tables(tables, target.supported_tables)
+    # A Lakeflow-only table has no Fivetran schema of its own.
+    default_schema = min(
+        (t["source_schema"] for t in tables if t.get("source_schema")), default=None
+    )
+    warnings = result.warnings
+    specs = result.objects
     keyless: list[str] = []
 
-    for table in connection.get("objects", []):
-        if not table.get("enabled"):
+    for row in rows:
+        if row["status"] not in KEPT_STATUSES:
             continue
-
-        source_table = table.get("source_table") or ""
-
-        if (
-            target.supported_tables is not None
-            and source_table.lower() not in {t.lower() for t in target.supported_tables}
-        ):
-            dropped.append(
-                f"{table.get('source_schema', '?')}.{source_table}"
-            )
-            continue
+        table = row["fivetran"] or {}
+        source_table = row["lakeflow_table"]
+        fivetran_schema = table.get("source_schema") or default_schema
 
         config: dict[str, Any] = {}
 
@@ -338,19 +440,22 @@ def _plan_objects(
                 "at ingest; reproduce with a downstream masking policy or transformation."
             )
 
+        # Fivetran's destination name only carries over when the source names
+        # match; a renamed table lands under its Lakeflow Connect name.
+        destination_table = table.get("destination_table") if row["status"] == "same_name" else None
         is_database = target.category is Category.DATABASE_CDC
         specs.append(
             {
                 "type": "report" if target.connection_type == "WORKDAY_RAAS" else "table",
                 "source_catalog": source_catalog if is_database else None,
-                "source_schema": target.fixed_source_schema or table.get("source_schema"),
-                "fivetran_source_schema": table.get("source_schema"),
-                "source_table": table.get("source_table"),
+                "source_schema": target.fixed_source_schema or fivetran_schema,
+                "fivetran_source_schema": fivetran_schema,
+                "source_table": source_table,
+                "fivetran_table": table.get("source_table"),
+                "status": row["status"],
                 "destination_catalog": target_catalog,
                 "destination_schema": destination_schema,
-                "destination_table": to_identifier(
-                    table.get("destination_table") or table.get("source_table")
-                ),
+                "destination_table": to_identifier(destination_table or source_table),
                 "table_configuration": config,
                 "primary_keys_known": table.get("primary_keys_known", False),
             }
@@ -360,21 +465,24 @@ def _plan_objects(
     # A database table genuinely without one changes source setup, e.g. SQL
     # Server needs CDC rather than change tracking for it.
     if keyless and target.category is Category.DATABASE_CDC:
-        shown = ", ".join(sorted(keyless)[:10])
-        more = f" and {len(keyless) - 10} more" if len(keyless) > 10 else ""
         warnings.append(
             f"Fivetran reports {len(keyless)} table(s) with no primary key at the source "
-            f"({shown}{more}). Keyless tables need the connector's keyless-table source "
-            "setup (for SQL Server, CDC instead of change tracking)."
+            f"({_sample(sorted(keyless))}). Keyless tables need the connector's keyless-table "
+            "source setup (for SQL Server, CDC instead of change tracking)."
         )
 
-    if dropped:
-        docs_hint = f" See {target.docs_url}" if target.docs_url else ""
-        warnings.append(
-            f"{len(dropped)} Fivetran table(s) have no Lakeflow Connect equivalent "
-            f"in the {target.connection_type} connector and were excluded: "
-            f"{', '.join(sorted(dropped))}.{docs_hint}"
-        )
+    warnings.extend(_table_warnings(rows, tables, target))
+    result.counts = _table_counts(rows)
+    result.blocker = _table_blocker(result.counts, target)
+    if target.supported_tables is not None:
+        result.plan = [
+            {
+                "fivetran_table": (r["fivetran"] or {}).get("source_table"),
+                "lakeflow_table": r["lakeflow_table"],
+                "status": r["status"],
+            }
+            for r in rows
+        ]
 
     if target.supported_tables is not None and target.last_verified:
         try:
@@ -393,7 +501,7 @@ def _plan_objects(
     rewritten = {
         s["fivetran_source_schema"]
         for s in specs
-        if s["fivetran_source_schema"] != s["source_schema"]
+        if s["fivetran_source_schema"] and s["fivetran_source_schema"] != s["source_schema"]
     }
     if rewritten:
         warnings.append(
@@ -402,7 +510,90 @@ def _plan_objects(
             "addresses objects under a schema it defines, not the one Fivetran used."
         )
 
-    return specs, warnings
+    return result
+
+
+def _table_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    def count(*statuses: str) -> int:
+        return sum(1 for r in rows if r["status"] in statuses)
+
+    return {
+        "tables": count(*KEPT_STATUSES),
+        "paired": count(*PAIRED_STATUSES),
+        "renamed": count("renamed"),
+        "lakeflow_only": count("lakeflow_only"),
+        "not_available": count("not_available"),
+        "disabled_in_fivetran": count("disabled_in_fivetran"),
+    }
+
+
+def _table_blocker(counts: dict[str, int], target: Target) -> str | None:
+    if counts["paired"]:
+        return None
+    if target.supported_tables is None:
+        return (
+            "No enabled tables to ingest. Enable tables in Fivetran and re-run discovery "
+            "(without --no-schemas)."
+        )
+    return (
+        f"None of the tables Fivetran syncs has an equivalent in {target.connection_type}, "
+        f"which offers {', '.join(sorted(target.supported_tables))}. Enable one in Fivetran "
+        "and re-run discovery, check Lakeflow Community Connectors (Beta) for one that covers "
+        "these tables, or keep this connection on Fivetran."
+    )
+
+
+def _table_warnings(
+    rows: list[dict[str, Any]], tables: list[dict[str, Any]], target: Target
+) -> list[str]:
+    connection_type = target.connection_type
+    warnings: list[str] = []
+
+    renamed = sorted(
+        f"{r['fivetran']['source_table']} as {r['lakeflow_table']}"
+        for r in rows
+        if r["status"] == "renamed"
+    )
+    if renamed:
+        warnings.append(
+            f"{len(renamed)} table(s) have a different name in {connection_type}, so "
+            "downstream references change (Fivetran as Lakeflow Connect): "
+            f"{_sample(renamed)}."
+        )
+
+    paired = any(r["status"] in PAIRED_STATUSES for r in rows)
+    lakeflow_only = sorted(r["lakeflow_table"] for r in rows if r["status"] == "lakeflow_only")
+    if paired and lakeflow_only:
+        warnings.append(
+            f"{len(lakeflow_only)} {connection_type} table(s) match no table Fivetran lists "
+            f"and are ingested too: {_sample(lakeflow_only)}. Remove any you do not need "
+            "from the bundle."
+        )
+
+    not_available = sorted(
+        f"{r['fivetran'].get('source_schema', '?')}.{r['fivetran'].get('source_table')}"
+        for r in rows
+        if r["status"] == "not_available"
+    )
+    if not_available:
+        docs_hint = f" See {target.docs_url}" if target.docs_url else ""
+        warnings.append(
+            f"{len(not_available)} Fivetran table(s) have no {connection_type} equivalent "
+            f"and are not migrated: {_sample(not_available)}.{docs_hint}"
+        )
+
+    disabled = sorted(
+        f"{t.get('source_schema', '?')}.{t.get('source_table')}"
+        for t in tables
+        if not t.get("enabled")
+    )
+    if disabled:
+        warnings.append(
+            f"{len(disabled)} table(s) disabled in Fivetran are not migrated "
+            f"({_sample(disabled)}); enable them in Fivetran and re-run discovery to "
+            "include them."
+        )
+    return warnings
 
 
 def _plan_schedule(connection: dict[str, Any]) -> dict[str, Any]:
@@ -483,7 +674,6 @@ def _prerequisites(
 def _assess(
     connection: dict[str, Any],
     target: Target,
-    objects: list[dict[str, Any]],
     schedule: dict[str, Any],
     reused_name: str | None = None,
     verified: bool = False,
@@ -531,12 +721,6 @@ def _assess(
         warnings.append(
             f"Release state for {target.connection_type} was not verified. Confirm against "
             "the current Lakeflow Connect connector list before committing to a date."
-        )
-
-    if not objects:
-        warnings.append(
-            "No enabled tables found. Either nothing is selected in Fivetran, or discovery "
-            "ran with --no-schemas."
         )
 
     if connection.get("networking_method") not in (None, "Directly"):
@@ -648,24 +832,25 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
         if i["target"]["scriptable"] == Scriptable.NO.value and i not in reused
     ]
 
-    tables_dropped = sum(
-        1
-        for i in items
-        for w in i.get("warnings", [])
-        if "have no Lakeflow Connect equivalent" in w
-    )
+    def total(key: str, among: list[dict[str, Any]]) -> int:
+        return sum(i.get("table_counts", {}).get(key, 0) for i in among)
 
     return {
         "connections_total": len(items),
         "connections_migratable": len(migratable),
-        "connections_blocked": len(items) - len(migratable),
+        "connections_not_migratable": len(items) - len(migratable),
         "connections_manual_sign_in": len(manual_connections),
         "connections_reused": len(reused),
-        "tables_total": sum(len(i["objects"]) for i in items),
-        "tables_dropped": tables_dropped,
+        # Table counts cover what the bundle ingests, so only migratable connections,
+        # except tables_not_available, which reports every gap.
+        "tables_total": sum(len(i["objects"]) for i in migratable),
+        "tables_paired": total("paired", migratable),
+        "tables_renamed": total("renamed", migratable),
+        "tables_lakeflow_only": total("lakeflow_only", migratable),
+        "tables_not_available": total("not_available", items),
         "tables_scd2": sum(
             1
-            for i in items
+            for i in migratable
             for o in i["objects"]
             if o["table_configuration"].get("scd_type") == "SCD_TYPE_2"
         ),

@@ -11,7 +11,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from ftlfc.workspace import WorkspaceError, cli_connection_lookup
+from ftlfc.workspace import WorkspaceError, cli_catalog_lookup, cli_connection_lookup
 
 
 def _runner(returncode: int, stdout: str = "", stderr: str = ""):
@@ -50,3 +50,20 @@ def test_missing_cli_is_an_error() -> None:
 
     with pytest.raises(WorkspaceError, match="not on PATH"):
         cli_connection_lookup("prod", runner=run)("pd")
+
+
+def test_catalog_lookup_is_a_read_only_get() -> None:
+    run = _runner(0, stdout='{"name": "main"}')
+    assert cli_catalog_lookup("prod", runner=run)("main") == {"name": "main"}
+    assert run.calls[0][:4] == ["databricks", "catalogs", "get", "main"]
+
+
+def test_missing_catalog_returns_none() -> None:
+    run = _runner(1, stderr="Error: Catalog 'main_dev' does not exist.")
+    assert cli_catalog_lookup("prod", runner=run)("main_dev") is None
+
+
+def test_catalog_auth_failure_is_an_error() -> None:
+    run = _runner(1, stderr="Error: refresh token is invalid")
+    with pytest.raises(WorkspaceError, match="catalog 'main'"):
+        cli_catalog_lookup("prod", runner=run)("main")
