@@ -14,11 +14,35 @@ import json
 import logging
 import stat
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.bundle import build_bundle
+from ftlfc.bundle import build_bundle, dev_catalog_for
+from ftlfc.workspace import WorkspaceError, cli_catalog_lookup
+
+
+def check_catalogs(
+    names: list[str], lookup: Callable[[str], dict | None]
+) -> dict[str, bool | None]:
+    """Report which catalogs exist. Warns rather than fails: the operator may be
+    about to create them, and nothing is deployed from here."""
+    found: dict[str, bool | None] = {}
+    for name in dict.fromkeys(names):
+        try:
+            found[name] = lookup(name) is not None
+        except WorkspaceError as exc:
+            found[name] = None
+            print(f"  warning: could not check catalog '{name}': {exc}", file=sys.stderr)
+            continue
+        if not found[name]:
+            print(
+                f"  warning: catalog '{name}' does not exist in the workspace; create it "
+                "before deploying, or pass --dev-catalog for the dev target",
+                file=sys.stderr,
+            )
+    return found
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +52,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", default="lakeflow-ingestion", help="bundle name")
     parser.add_argument("--host", help="Databricks workspace URL for both targets")
     parser.add_argument("--email", help="address for pipeline and job failure notifications")
+    parser.add_argument(
+        "--dev-catalog",
+        help="catalog the dev target writes to (default: <plan target catalog>_dev)",
+    )
+    parser.add_argument(
+        "--databricks-profile",
+        help="CLI profile of the target workspace, to confirm (read-only) that the dev and "
+        "prod catalogs exist; warns if they do not",
+    )
     parser.add_argument(
         "--force", action="store_true", help="overwrite an existing output directory"
     )
@@ -52,7 +85,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    files = build_bundle(plan, bundle_name=args.name, host=args.host, notification_email=args.email)
+    dev_catalog = dev_catalog_for(plan, args.dev_catalog)
+    catalog_exists: dict[str, bool | None] = {}
+    if args.databricks_profile:
+        catalog_exists = check_catalogs(
+            [dev_catalog, plan["target_catalog"]], cli_catalog_lookup(args.databricks_profile)
+        )
+
+    files = build_bundle(
+        plan,
+        bundle_name=args.name,
+        host=args.host,
+        notification_email=args.email,
+        dev_catalog=dev_catalog,
+        catalog_exists=catalog_exists,
+    )
 
     for relative, contents in sorted(files.items()):
         path = args.output / relative

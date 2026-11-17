@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -11,8 +12,10 @@ import yaml
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import generate_bundle
 from ftlfc.bundle import build_bundle
 from ftlfc.mapping import build_plan
+from ftlfc.workspace import WorkspaceError
 
 
 def _item(
@@ -105,6 +108,22 @@ class TestRoot:
         root = _load(build_bundle(_plan(_item()), "acme"), "databricks.yml")
         assert root["targets"]["dev"]["variables"]["dest_catalog"] == "main_prod_dev"
         assert root["targets"]["prod"]["variables"]["dest_catalog"] == "main_prod"
+
+    def test_dev_catalog_can_be_overridden(self) -> None:
+        files = build_bundle(_plan(_item()), "acme", dev_catalog="sandbox")
+        root = _load(files, "databricks.yml")
+        assert root["targets"]["dev"]["variables"]["dest_catalog"] == "sandbox"
+        assert root["targets"]["prod"]["variables"]["dest_catalog"] == "main_prod"
+
+    def test_prod_target_sets_a_root_path(self) -> None:
+        # mode: production does not validate without an explicit root_path.
+        for host in (None, "https://x.databricks.com"):
+            root = _load(build_bundle(_plan(_item()), "acme", host=host), "databricks.yml")
+            assert root["targets"]["prod"]["workspace"]["root_path"] == (
+                "/Workspace/Users/${workspace.current_user.userName}/.bundle/"
+                "${bundle.name}/${bundle.target}"
+            )
+            assert "root_path" not in root["targets"]["dev"].get("workspace", {})
 
     def test_workspace_is_omitted_when_no_host_is_given(self) -> None:
         root = _load(build_bundle(_plan(_item()), "acme"), "databricks.yml")
@@ -444,6 +463,19 @@ class TestSupportedTableObjects:
         assert "## Renamed tables" in readme
         assert "| `incident` | `pagerduty.incidents` |" in readme
 
+    def test_readme_lists_lakeflow_only_tables(self) -> None:
+        plan = _pagerduty_plan()
+        key = plan["items"][0]["target"]["pipeline_name"]
+        readme = build_bundle(plan, "acme")["README.md"]
+        assert "## Lakeflow Connect-only tables" in readme
+        assert f"| `pagerduty.priorities` | `{key}` |" in readme
+        # Paired tables are not listed as Lakeflow Connect-only.
+        section = readme.split("## Lakeflow Connect-only tables")[1]
+        assert "pagerduty.incidents" not in section
+
+    def test_readme_omits_lakeflow_only_section_without_such_tables(self) -> None:
+        assert "Lakeflow Connect-only" not in build_bundle(_plan(_item()), "acme")["README.md"]
+
     def test_saas_without_supported_tables_emits_explicit_objects(self) -> None:
         files = build_bundle(_plan(_item()), "acme")
         pipeline = _load(files, "resources/sales_abc.pipeline.yml")["resources"]["pipelines"][
@@ -483,3 +515,91 @@ class TestReusedConnections:
         readme = build_bundle(_plan(_reused(verified=verified)), "acme")["README.md"]
         assert "## Existing connections" in readme
         assert f"| `pd_prod` | PAGERDUTY | {label} |" in readme
+
+    def test_readme_skips_replace_me_step_when_nothing_is_created(self) -> None:
+        files = build_bundle(_plan(_reused()), "acme")
+        assert "REPLACE_ME" not in files["scripts/create_connections.sh"].split("set -euo")[1]
+        assert "Fill in every `REPLACE_ME`" not in files["README.md"]
+
+
+class TestReadmeSetup:
+    def test_replace_me_step_appears_when_the_script_needs_values(self) -> None:
+        readme = build_bundle(_plan(_item()), "acme")["README.md"]
+        assert "Fill in every `REPLACE_ME`" in readme
+
+    def test_readme_documents_the_prod_root_path_choice(self) -> None:
+        readme = build_bundle(_plan(_item()), "acme")["README.md"]
+        assert "`workspace.root_path`" in readme
+        assert "run_as.service_principal_name" in readme
+
+    @pytest.mark.parametrize(
+        "exists,label",
+        [
+            (True, "confirmed in the workspace"),
+            (False, "not found in the workspace"),
+            (None, "not checked"),
+        ],
+    )
+    def test_readme_reports_each_catalog(self, exists: bool | None, label: str) -> None:
+        readme = build_bundle(
+            _plan(_item()), "acme", catalog_exists={"main_prod_dev": exists, "main_prod": True}
+        )["README.md"]
+        dev_line = next(line for line in readme.splitlines() if "`main_prod_dev` (dev)" in line)
+        assert label in dev_line
+        assert "`main_prod` (prod): confirmed in the workspace" in readme
+
+    def test_unchecked_catalogs_say_how_to_check(self) -> None:
+        readme = build_bundle(_plan(_item()), "acme", dev_catalog="sandbox")["README.md"]
+        assert "`sandbox` (dev): not checked" in readme
+        assert "databricks catalogs get sandbox" in readme
+
+
+class TestCatalogCheck:
+    def test_missing_catalog_warns_and_does_not_fail(self, capsys) -> None:
+        found = generate_bundle.check_catalogs(
+            ["main_dev", "main"], lambda name: {"name": name} if name == "main" else None
+        )
+        assert found == {"main_dev": False, "main": True}
+        err = capsys.readouterr().err
+        assert "catalog 'main_dev' does not exist" in err and "--dev-catalog" in err
+        assert "'main' does not exist" not in err
+
+    def test_lookup_error_is_reported_as_unchecked(self, capsys) -> None:
+        def lookup(name: str):
+            raise WorkspaceError("refresh token is invalid")
+
+        assert generate_bundle.check_catalogs(["main"], lookup) == {"main": None}
+        assert "could not check catalog 'main'" in capsys.readouterr().err
+
+    def test_same_catalog_is_checked_once(self) -> None:
+        seen: list[str] = []
+        generate_bundle.check_catalogs(["main", "main"], lambda n: seen.append(n) or {})
+        assert seen == ["main"]
+
+    def test_cli_flags_set_the_dev_catalog_and_check_both(self, tmp_path, monkeypatch) -> None:
+        checked: list[str] = []
+        monkeypatch.setattr(
+            generate_bundle,
+            "cli_catalog_lookup",
+            lambda profile: lambda name: checked.append((profile, name)) or {"name": name},
+        )
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(_plan(_item())))
+        code = generate_bundle.main(
+            [
+                "-p",
+                str(plan_path),
+                "-o",
+                str(tmp_path / "bundle"),
+                "--dev-catalog",
+                "sandbox",
+                "--databricks-profile",
+                "staging",
+            ]
+        )
+        assert code == 0
+        assert checked == [("staging", "sandbox"), ("staging", "main_prod")]
+        root = yaml.safe_load((tmp_path / "bundle/databricks.yml").read_text())
+        assert root["targets"]["dev"]["variables"]["dest_catalog"] == "sandbox"
+        readme = (tmp_path / "bundle/README.md").read_text()
+        assert "`sandbox` (dev): confirmed in the workspace" in readme
