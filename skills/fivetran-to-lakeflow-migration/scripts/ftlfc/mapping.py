@@ -316,7 +316,6 @@ def _plan_connection(
     tables = _plan_objects(
         connection, target, target_catalog, keep_lakeflow_only(target, include_lakeflow_only)
     )
-    objects = tables.objects
     schedule = _plan_schedule(connection)
     blockers, warnings = _assess(
         connection,
@@ -329,9 +328,10 @@ def _plan_connection(
     )
     if tables.blocker:
         blockers.append(tables.blocker)
-        objects = []
     if reuse_blocker:
         blockers.append(reuse_blocker)
+    if blockers:
+        tables.withdraw()
 
     return {
         "fivetran": {
@@ -364,7 +364,7 @@ def _plan_connection(
             "alternative": target.alternative,
             "has_supported_tables": target.supported_tables is not None,
         },
-        "objects": objects,
+        "objects": tables.objects,
         "table_counts": tables.counts,
         "table_plan": tables.plan,
         "schedule": schedule,
@@ -411,6 +411,15 @@ class _TablePlan:
     counts: dict[str, int] = field(default_factory=dict)
     #: Every row with its status, for connectors with a supported-table list.
     plan: list[dict[str, Any]] | None = None
+
+    def withdraw(self) -> None:
+        """A blocked item ingests nothing. Statuses stay, since they explain the blocker."""
+        self.objects = []
+        for key in ("tables", "lakeflow_only", "lakeflow_skipped"):
+            if key in self.counts:
+                self.counts[key] = 0
+        for row in self.plan or []:
+            row["kept"] = False
 
 
 def _plan_objects(
@@ -505,8 +514,8 @@ def _plan_objects(
         )
 
     warnings.extend(_table_warnings(rows, tables, target, keep_lakeflow))
+    result.blocker = _table_blocker(rows, target)
     result.counts = _table_counts(rows, keep_lakeflow)
-    result.blocker = _table_blocker(result.counts, target)
     if target.supported_tables is not None:
         result.plan = [
             {
@@ -562,8 +571,8 @@ def _table_counts(rows: list[dict[str, Any]], keep_lakeflow: bool) -> dict[str, 
     }
 
 
-def _table_blocker(counts: dict[str, int], target: Target) -> str | None:
-    if counts["paired"]:
+def _table_blocker(rows: list[dict[str, Any]], target: Target) -> str | None:
+    if any(r["status"] in PAIRED_STATUSES for r in rows):
         return None
     if target.supported_tables is None:
         return (

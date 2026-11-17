@@ -559,6 +559,59 @@ class TestLakeflowOnlyCap:
         assert item["table_counts"]["tables"] == 1
         assert item["table_counts"]["lakeflow_skipped"] == 136
 
+    @pytest.mark.parametrize("mode", ["auto", "all", "none"])
+    def test_blocked_anaplan_reports_nothing_kept(self, mode: str) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="anaplan", objects=[_table(source_table="plans")])),
+            "main",
+            include_lakeflow_only=mode,
+        )
+        item = plan["items"][0]
+        assert item["blockers"][0].startswith("None of the tables Fivetran syncs")
+        assert item["objects"] == []
+        counts = item["table_counts"]
+        assert (counts["tables"], counts["lakeflow_only"], counts["lakeflow_skipped"]) == (0, 0, 0)
+        assert counts["not_available"] == 1
+        assert {(r["lakeflow_table"], r["status"], r["kept"]) for r in item["table_plan"]} == {
+            ("audit_events", "lakeflow_only", False),
+            ("users", "lakeflow_only", False),
+            (None, "not_available", False),
+        }
+        assert plan["summary"]["tables_total"] == 0
+        assert plan["summary"]["tables_lakeflow_only"] == 0
+        assert plan["summary"]["tables_not_available"] == 1
+
+    def test_blocked_unmapped_workday_reports_nothing_skipped(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(service="workday_hcm", objects=[_table(source_table="payroll_xyz")])
+            ),
+            "main",
+        )
+        item = plan["items"][0]
+        assert item["blockers"][0].startswith("None of the tables Fivetran syncs")
+        assert "and 127 more" in item["blockers"][0]
+        assert item["blockers"][0].endswith(lookup("workday_hcm").docs_url)
+        assert item["objects"] == []
+        assert item["table_counts"]["tables"] == 0
+        assert item["table_counts"]["lakeflow_skipped"] == 0
+        assert not any(r["kept"] for r in item["table_plan"])
+        assert plan["summary"]["tables_lakeflow_skipped"] == 0
+
+    def test_reuse_blocker_also_withdraws_tables(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "missing_conn"},
+            lookup_connection=lambda name: None,
+        )
+        item = plan["items"][0]
+        assert any("does not exist" in b for b in item["blockers"])
+        assert item["objects"] == []
+        assert item["table_counts"]["tables"] == 0
+        assert item["table_counts"]["paired"] == 1
+        assert not any(r["kept"] for r in item["table_plan"])
+
     def test_rejects_an_unknown_mode(self) -> None:
         with pytest.raises(ValueError, match="include_lakeflow_only must be one of"):
             build_plan(_inventory(_connection()), "main", include_lakeflow_only="some")
