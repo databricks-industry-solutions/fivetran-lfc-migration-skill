@@ -107,11 +107,14 @@ class TestCatalog:
 
     @pytest.mark.parametrize("target", [lookup("mongo"), UNKNOWN])
     def test_no_connector_alternatives_point_at_community_connectors(self, target) -> None:
-        assert "Lakeflow Community Connectors (Beta, open source" in target.alternative
+        assert "Lakeflow Community Connectors (open source" in target.alternative
         assert COMMUNITY_CONNECTORS_URL in target.alternative
 
-    def test_pagerduty_addresses_tables_under_the_default_schema(self) -> None:
-        assert lookup("pagerduty").fixed_source_schema == "default"
+    @pytest.mark.parametrize(
+        "service", ["pagerduty", "anaplan", "hubspot", "zendesk", "jira", "workday_hcm"]
+    )
+    def test_connectors_with_a_default_schema_rewrite_it(self, service) -> None:
+        assert lookup(service).fixed_source_schema == "default"
 
     def test_warehouses_route_to_federation(self) -> None:
         assert lookup("snowflake_db").category is Category.FEDERATION
@@ -566,8 +569,9 @@ class TestSupportedTablePairing:
             (
                 f"None of the tables Fivetran syncs has an equivalent in PAGERDUTY, which offers "
                 f"{offered}. Enable one in Fivetran and re-run discovery, check Lakeflow "
-                "Community Connectors (Beta) for one that covers these tables, or keep this "
-                "connection on Fivetran."
+                "Community Connectors for one that covers these tables, or keep this "
+                "connection on Fivetran. Supported tables: "
+                f"{lookup('pagerduty').docs_url}"
             )
         ]
         assert item["objects"] == []
@@ -664,6 +668,27 @@ class TestCatalogSupportedTables:
         assert target.supported_tables is not None
         assert "pull_requests" in target.supported_tables
 
+    @pytest.mark.parametrize(
+        ("service", "count", "member"),
+        [
+            ("workday_hcm", 137, "worker_positions"),
+            ("google_ads", 24, "local_services_lead_conversation"),
+            ("hubspot", 30, "deals_pipelines"),
+            ("zendesk", 46, "audit_logs"),
+            ("jira", 28, "status_category"),
+            ("github", 23, "repo_contents"),
+            ("linkedin_ads", 12, "account_user_history"),
+            ("anaplan", 2, "audit_events"),
+            ("pagerduty", 10, "oncalls"),
+        ],
+    )
+    def test_supported_table_lists_match_the_docs(self, service, count, member) -> None:
+        target = lookup(service)
+        assert len(target.supported_tables) == count
+        assert member in target.supported_tables
+        assert target.docs_url.startswith("https://docs.databricks.com/")
+        assert target.last_verified
+
     def test_database_connectors_have_no_supported_tables(self) -> None:
         for service in ("sql_server", "postgres", "mysql", "oracle"):
             target = lookup(service)
@@ -675,19 +700,10 @@ class TestCatalogSupportedTables:
         target = lookup("salesforce")
         assert target.supported_tables is None
 
-    def test_all_managed_connectors_have_docs_url_or_notes(self) -> None:
+    def test_all_managed_connectors_link_their_docs(self) -> None:
         for service, target in CATALOG.items():
             if target.has_managed_connector:
-                has_context = (
-                    target.docs_url
-                    or target.notes
-                    or target.source_prerequisites
-                    or target.auth_note
-                )
-                assert has_context, (
-                    f"{service} ({target.connection_type}) has no docs_url, notes, "
-                    "auth_note, or source_prerequisites"
-                )
+                assert target.docs_url.startswith("https://docs.databricks.com/"), service
 
 
 def _pagerduty(connection_id: str = "pd1") -> dict:
@@ -703,10 +719,10 @@ def _availability_warnings(item: dict) -> list[str]:
 
 
 class TestAvailabilityWording:
-    def test_beta_points_at_the_workspace_previews_page_not_the_account_team(self) -> None:
+    def test_beta_links_the_connector_docs_not_the_account_team(self) -> None:
         item = build_plan(_inventory(_pagerduty()), "main")["items"][0]
         (warning,) = _availability_warnings(item)
-        assert "Previews page" in warning
+        assert warning.endswith(f"See {lookup('pagerduty').docs_url}")
         assert "account team" not in warning
         assert "confirm" in warning
 
@@ -716,6 +732,15 @@ class TestAvailabilityWording:
         ][0]
         (warning,) = _availability_warnings(item)
         assert "account team" in warning
+        assert "postgresql-reference" in warning
+
+    def test_no_managed_connector_blocker_links_the_alternative(self) -> None:
+        item = build_plan(_inventory(_connection(service="s3", objects=[_table()])), "main")[
+            "items"
+        ][0]
+        (blocker,) = item["blockers"]
+        assert blocker.endswith(f"See {lookup('s3').docs_url}")
+        assert "auto-loader" in blocker
 
 
 class TestConnectionReuse:

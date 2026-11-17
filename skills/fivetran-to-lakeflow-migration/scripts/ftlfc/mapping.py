@@ -489,11 +489,10 @@ def _plan_objects(
             verified = dt.date.fromisoformat(target.last_verified)
             age = (dt.date.today() - verified).days
             if age > STALENESS_DAYS:
-                docs_suffix = f" {target.docs_url}" if target.docs_url else ""
                 warnings.append(
                     f"The {target.connection_type} supported-table list was last verified "
-                    f"on {target.last_verified} ({age} days ago). Check the connector "
-                    f"reference for newly added tables.{docs_suffix}"
+                    f"on {target.last_verified} ({age} days ago). Check "
+                    f"{target.docs_url or 'the connector reference'} for newly added tables."
                 )
         except ValueError:
             pass
@@ -537,9 +536,10 @@ def _table_blocker(counts: dict[str, int], target: Target) -> str | None:
         )
     return (
         f"None of the tables Fivetran syncs has an equivalent in {target.connection_type}, "
-        f"which offers {', '.join(sorted(target.supported_tables))}. Enable one in Fivetran "
-        "and re-run discovery, check Lakeflow Community Connectors (Beta) for one that covers "
+        f"which offers {_sample(sorted(target.supported_tables))}. Enable one in Fivetran "
+        "and re-run discovery, check Lakeflow Community Connectors for one that covers "
         "these tables, or keep this connection on Fivetran."
+        f"{_see(target, 'Supported tables:')}"
     )
 
 
@@ -576,10 +576,9 @@ def _table_warnings(
         if r["status"] == "not_available"
     )
     if not_available:
-        docs_hint = f" See {target.docs_url}" if target.docs_url else ""
         warnings.append(
             f"{len(not_available)} Fivetran table(s) have no {connection_type} equivalent "
-            f"and are not migrated: {_sample(not_available)}.{docs_hint}"
+            f"and are not migrated: {_sample(not_available)}.{_see(target)}"
         )
 
     disabled = sorted(
@@ -688,6 +687,7 @@ def _assess(
     if not target.has_managed_connector:
         blockers.append(
             f"No managed Lakeflow Connect connector for '{service}'. {target.alternative}"
+            f"{_see(target)}"
         )
         return blockers, warnings
 
@@ -720,7 +720,8 @@ def _assess(
     elif target.availability is Availability.UNVERIFIED:
         warnings.append(
             f"Release state for {target.connection_type} was not verified. Confirm against "
-            "the current Lakeflow Connect connector list before committing to a date."
+            "the connector docs before committing to a date."
+            f"{_see(target)}"
         )
 
     if connection.get("networking_method") not in (None, "Directly"):
@@ -770,16 +771,15 @@ def _availability_warning(
         if verified:
             return None
         message = (
-            f"The {target.connection_type} connector is in Beta. A workspace admin turns Beta "
-            "connectors on from the workspace Previews page; confirm it is on in the "
-            "workspace you deploy to."
+            f"The {target.connection_type} connector is in Beta; confirm it is enabled in "
+            "the workspace you deploy to."
         )
         if unchecked_reuse:
             message += (
                 f" Reusing connection '{unchecked_reuse}' suggests it already is; pass "
                 "--databricks-profile to confirm and drop this note."
             )
-        return message
+        return message + _see(target)
     if target.availability is Availability.PUBLIC_PREVIEW:
         if verified:
             return None
@@ -787,8 +787,13 @@ def _availability_warning(
             f"The {target.connection_type} connector is in Public Preview. Some Public Preview "
             "connectors need enrollment through the Databricks account team; confirm access "
             "in the workspace you deploy to."
+            f"{_see(target)}"
         )
     return None
+
+
+def _see(target: Target, label: str = "See") -> str:
+    return f" {label} {target.docs_url}" if target.docs_url else ""
 
 
 def _mar_for(connection: dict[str, Any], mar: dict[str, Any] | None) -> int | None:

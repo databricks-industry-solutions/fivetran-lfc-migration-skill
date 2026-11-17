@@ -200,8 +200,9 @@ and only after reconciliation passes.
 
 **Connector availability changes constantly.** The catalog in
 `${SCRIPTS}/ftlfc/catalog.py` marks entries `UNVERIFIED` where the release state
-could not be confirmed. Before committing to a date with a customer, check the
-[current connector list](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/)
+could not be confirmed, and each managed connector carries a `docs_url` (the
+Databricks page that lists its supported tables) that the plan's warnings and
+blockers link. Before committing to a date with a customer, check that page
 and the workspace's own Previews page.
 
 ## Stage 1: Discover (Assessment)
@@ -416,9 +417,9 @@ mean:
   have no key: those need the connector's keyless-table setup (for SQL
   Server, CDC instead of change tracking).
 - **Beta / Public Preview.** The catalog labels release state; it does not
-  check the workspace. Beta connectors are turned on from the workspace
-  Previews page, some Public Preview ones through the account team. Ask the
-  customer to confirm rather than asserting it is disabled.
+  check the workspace. The note links the connector's docs page, which says
+  how to turn it on (the Previews page, a named preview, or the account team).
+  Ask the customer to confirm rather than asserting it is disabled.
 - **Hashed columns.** Fivetran hashes at ingest; Lakeflow Connect has no
   equivalent. Reproduce with a downstream masking policy, and tell the customer
   the raw value will land in the bronze table.
@@ -428,7 +429,7 @@ mean:
   another path, not a dead end. Object storage goes to Auto Loader, message
   buses to a streaming source, warehouses to federation, and other sources
   may have a [Lakeflow Community Connector](https://docs.databricks.com/aws/en/ingestion/community-connectors)
-  (Beta, open source,
+  (open source,
   [databrickslabs/lakeflow-community-connectors](https://github.com/databrickslabs/lakeflow-community-connectors)).
 - **Fixed table lists.** For connectors with `supported_tables` in the
   catalog, the plan starts from the Lakeflow Connect list and pairs each table

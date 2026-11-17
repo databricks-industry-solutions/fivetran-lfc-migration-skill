@@ -174,9 +174,8 @@ _SALESFORCE_PREREQ = (
 _SALESFORCE_MTLS = (
     "Scriptable via mTLS + OAuth client credentials, after a Salesforce admin uploads a "
     "certificate signed by a Salesforce-trusted public CA (allow lead time) and configures "
-    "a connected app for the client credentials flow. Earlier docs marked mTLS Beta behind "
-    "a workspace preview; the connection page no longer does, so confirm on the workspace "
-    "Previews page. Browser OAuth is the fallback if the customer declines this setup."
+    "a connected app for the client credentials flow. Browser OAuth is the fallback if the "
+    "customer declines this setup."
 )
 _WORKDAY_RAAS_PREREQ = (
     "All in the Workday UI: create an Integration System User, an unconstrained "
@@ -202,11 +201,13 @@ _FEDERATION_ALT = (
     "Federation foreign catalog, or Delta Sharing / Iceberg where a copy is not needed."
 )
 
-COMMUNITY_CONNECTORS_URL = "https://docs.databricks.com/aws/en/ingestion/community-connectors"
+_INGESTION_DOCS = "https://docs.databricks.com/aws/en/ingestion/"
+_DOCS = f"{_INGESTION_DOCS}lakeflow-connect/"
+COMMUNITY_CONNECTORS_URL = f"{_INGESTION_DOCS}community-connectors"
 
 _TYPE_ONLY_VERIFIED = (
-    "Connector type confirmed against the SDK IngestionSourceType enum. Release state and "
-    "auth mode were not confirmed, so verify both in the workspace before promising a date."
+    "Connector type confirmed against the SDK IngestionSourceType enum. The auth mode was "
+    "not confirmed, so verify it in the workspace before promising a date."
 )
 
 
@@ -249,7 +250,7 @@ def _u2m(connection_type: str, **kwargs) -> Target:
     return _saas(connection_type, **kwargs)
 
 
-def _none(alternative: str, notes: str = "") -> Target:
+def _none(alternative: str, notes: str = "", docs_url: str = "") -> Target:
     return Target(
         connection_type=None,
         category=Category.NONE,
@@ -257,6 +258,7 @@ def _none(alternative: str, notes: str = "") -> Target:
         scriptable=Scriptable.NA,
         alternative=alternative,
         notes=notes,
+        docs_url=docs_url,
     )
 
 
@@ -267,6 +269,7 @@ def _federated() -> Target:
         availability=Availability.UNVERIFIED,
         scriptable=Scriptable.YES,
         alternative=_FEDERATION_ALT,
+        docs_url=f"{_DOCS}query-based-overview",
     )
 
 
@@ -343,19 +346,87 @@ _GITHUB_TABLES = frozenset({
     "releases", "tags", "team_members", "teams", "workflows",
 })
 
-_WORKDAY_HCM_TABLES = frozenset({"workers", "payroll_result"})
+_WORKDAY_HCM_TABLES = frozenset({
+    "absence_input",
+    "candidate", "candidate_certification", "candidate_education", "candidate_experience",
+    "candidate_language", "candidate_name", "candidate_pool_membership", "candidate_skill",
+    "candidate_tag", "candidate_website",
+    "compensation_allowance_plan_amount_profile",
+    "compensation_allowance_plan_percent_profile",
+    "compensation_bonus_plan_coverage_date_eligibility_rule",
+    "compensation_bonus_plan_performance_factor_scorecard",
+    "compensation_bonus_plan_replacement_percent", "compensation_bonus_tranche",
+    "compensation_commission_plan_profile", "compensation_future_payment_bonus_plan",
+    "compensation_grade", "compensation_grade_profile",
+    "compensation_merit_plan_replacement_percent", "compensation_plan", "compensation_step",
+    "compensation_stock_plan_amount_profile", "compensation_stock_plan_grant",
+    "compensation_stock_plan_unit_profile", "compensation_stock_profile_grant_split",
+    "deferred_compensation_eligibility_rule",
+    "ethnicity",
+    "external_reference_line", "external_reference_participant",
+    "gender_identity",
+    "interview", "interview_competency", "interview_questionnaire", "interview_session",
+    "interview_session_detail",
+    "interviewer",
+    "job_family_job_profile", "job_profile", "job_profile_certification",
+    "job_profile_classification", "job_profile_company_insider", "job_profile_competency",
+    "job_profile_education", "job_profile_exempt", "job_profile_language",
+    "job_profile_language_ability", "job_profile_pay_rate", "job_profile_responsibility",
+    "job_profile_restrict_to_country", "job_profile_skill", "job_profile_training",
+    "job_profile_work_experience", "job_profile_worker_compensation", "job_requisition",
+    "job_requisition_additional_job_posting_location",
+    "job_requisition_additional_job_profile", "job_requisition_additional_location",
+    "job_requisition_allowance_plan", "job_requisition_bonus_plan",
+    "job_requisition_calculated_plan", "job_requisition_certification",
+    "job_requisition_commission_plan", "job_requisition_compensation",
+    "job_requisition_competency", "job_requisition_custom_organization",
+    "job_requisition_default_assessment_test", "job_requisition_education",
+    "job_requisition_language", "job_requisition_language_ability",
+    "job_requisition_merit_plan", "job_requisition_organization",
+    "job_requisition_pay_plan", "job_requisition_period_salary_plan",
+    "job_requisition_position", "job_requisition_responsibility", "job_requisition_skill",
+    "job_requisition_stock_plan", "job_requisition_training",
+    "job_requisition_unit_allowance_plan", "job_requisition_unit_salary_plan",
+    "job_requisition_work_experience",
+    "lgbt_identification",
+    "organization", "organization_assignment", "organization_leader", "organization_role",
+    "organization_role_worker",
+    "override_balance",
+    "payroll_line", "payroll_line_pay_component", "payroll_line_related_calculation",
+    "payroll_line_withholding", "payroll_local_city_authority_tax_worktag",
+    "payroll_local_county_authority_tax_worktag", "payroll_national_id", "payroll_result",
+    "payroll_state_authority_tax_worktag",
+    "position", "position_bonus_plan", "position_certification", "position_competency",
+    "position_education", "position_job_family", "position_job_profile",
+    "position_language", "position_location", "position_merit_plan",
+    "position_organization", "position_pay_plan", "position_responsibility",
+    "position_skill", "position_stock_plan", "position_training",
+    "position_work_experience", "position_worker_type_restriction",
+    "pronoun",
+    "questionnaire", "questionnaire_answer", "questionnaire_setup",
+    "sexual_orientation",
+    "time_off_plan_balance", "time_off_plan_balance_position",
+    "worker_collective_agreement", "worker_leave_status", "worker_position_compensation",
+    "worker_position_end_employment_reason", "worker_position_job_classification",
+    "worker_position_manager", "worker_position_organization",
+    "worker_position_payroll_reporting_code", "worker_positions", "worker_probation_period",
+    "worker_secondary_termination_reason",
+    "workers",
+})
 
 _GOOGLE_ADS_TABLES = frozenset({
     # Resource tables
     "customer", "campaign", "campaign_budget", "campaign_criterion",
     "ad_group", "ad_group_criterion", "ad",
     # Report tables
+    "customer_report", "campaign_report", "ad_group_report", "ad_report",
     "keyword_report", "search_query_report",
     "customer_hourly_report", "campaign_hourly_report", "ad_group_hourly_report",
     "audience_report", "click_report", "landing_page_report",
     "search_keyword_report",
     # Event tables
     "call_view", "lead_form_submission", "local_services_lead",
+    "local_services_lead_conversation",
 })
 
 _LINKEDIN_ADS_TABLES = frozenset({
@@ -371,7 +442,9 @@ _LINKEDIN_ADS_TABLES = frozenset({
     "monthly_ad_analytics_by_member_seniority_report",
 })
 
-_VERIFIED_DATE = "2026-09-15"
+_ANAPLAN_TABLES = frozenset({"audit_events", "users"})
+
+_VERIFIED_DATE = "2026-11-17"
 
 # Fivetran service id -> Lakeflow Connect target.
 #
@@ -387,10 +460,8 @@ CATALOG: dict[str, Target] = {
             gateway=Gateway.REQUIRED,
             supports_integrated_cdc=True,
             source_prerequisites=_SQLSERVER_PREREQ,
-            docs_url=(
-                "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
-                "sql-server-integrated-pipeline"
-            ),
+            docs_url=f"{_DOCS}sql-server-reference",
+            last_verified=_VERIFIED_DATE,
             notes=(
                 "Two GA architectures. Integrated CDC (connector_type: CDC) runs one "
                 "serverless pipeline that references the UC connection directly and stages "
@@ -411,9 +482,10 @@ CATALOG: dict[str, Target] = {
             gateway=Gateway.REQUIRED,
             source_prerequisites=_POSTGRES_PREREQ,
             notes=(
-                "Public Preview; enrollment via the account team. The replication slot "
-                "must be dropped manually when the pipeline is deleted."
+                "The replication slot must be dropped manually when the pipeline is deleted."
             ),
+            docs_url=f"{_DOCS}postgresql-reference",
+            last_verified=_VERIFIED_DATE,
         )
         for service in (
             "postgres",
@@ -430,7 +502,8 @@ CATALOG: dict[str, Target] = {
             availability=Availability.PUBLIC_PREVIEW,
             gateway=Gateway.REQUIRED,
             source_prerequisites=_MYSQL_PREREQ,
-            notes="Public Preview; enrollment via the account team.",
+            docs_url=f"{_DOCS}mysql-reference",
+            last_verified=_VERIFIED_DATE,
         )
         for service in ("mysql", "mysql_rds", "aurora", "azure_mysql", "maria", "maria_rds")
     },
@@ -441,21 +514,23 @@ CATALOG: dict[str, Target] = {
             availability=Availability.BETA,
             gateway=Gateway.NOT_REQUIRED,
             source_prerequisites=_ORACLE_PREREQ,
-            notes=(
-                "Beta, enabled from the workspace Previews page. Uses integrated CDC via "
-                "LogMiner, so no separate gateway pipeline."
-            ),
+            notes="Uses integrated CDC via LogMiner, so no separate gateway pipeline.",
+            docs_url=f"{_DOCS}oracle-reference",
+            last_verified=_VERIFIED_DATE,
         )
         for service in ("oracle", "oracle_rds", "oracle_hva", "oracle_ebs")
     },
     "teradata": Target(
         connection_type="TERADATA",
         category=Category.QUERY_BASED,
+        availability=Availability.GA,
         source_prerequisites=(
             "Each table needs a monotonically increasing cursor column. Rows with a NULL "
             "cursor are never ingested."
         ),
         notes="Query-based only; there is no Teradata CDC connector.",
+        docs_url=f"{_DOCS}query-based-overview",
+        last_verified=_VERIFIED_DATE,
     ),
     # -- SaaS: scriptable with static credentials ---------------------------
     "salesforce": _saas(
@@ -472,10 +547,7 @@ CATALOG: dict[str, Target] = {
             "pipelines.enableSalesforceFormulaFieldsMVComputation, not the private "
             "salesforce_include_formula_fields table field."
         ),
-        docs_url=(
-            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
-            "salesforce-reference"
-        ),
+        docs_url=f"{_DOCS}salesforce-reference",
         last_verified=_VERIFIED_DATE,
     ),
     "salesforce_sandbox": _saas(
@@ -487,10 +559,7 @@ CATALOG: dict[str, Target] = {
         prereq=_SALESFORCE_PREREQ,
         prereq_auto=False,
         fixed_source_schema="objects",
-        docs_url=(
-            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
-            "salesforce-reference"
-        ),
+        docs_url=f"{_DOCS}salesforce-reference",
         last_verified=_VERIFIED_DATE,
     ),
     "workday": _saas(
@@ -501,20 +570,20 @@ CATALOG: dict[str, Target] = {
         prereq_auto=False,
         notes=(
             "Ingested as report objects, not tables. Reports are capped around 2 GB or 1M "
-            "records and incremental ingestion is Beta."
+            "records."
         ),
+        docs_url=f"{_DOCS}workday-reports-reference",
     ),
     "workday_hcm": _saas(
         "WORKDAY_HCM",
+        availability=Availability.BETA,
         scriptable=Scriptable.YES,
         prereq=_WORKDAY_RAAS_PREREQ,
         prereq_auto=False,
+        fixed_source_schema="default",
         notes="Distinct connection type from WORKDAY_RAAS. Needs instance_url and tenant_name.",
         supported_tables=_WORKDAY_HCM_TABLES,
-        docs_url=(
-            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
-            "workday-hcm-reference"
-        ),
+        docs_url=f"{_DOCS}workday-hcm-reference",
         last_verified=_VERIFIED_DATE,
     ),
     "servicenow": _saas(
@@ -528,21 +597,20 @@ CATALOG: dict[str, Target] = {
         preferred_auth="OAUTH_RESOURCE_OWNER_PASSWORD",
         prereq=_SERVICENOW_PREREQ,
         prereq_auto=False,
-        docs_url=(
-            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
-            "servicenow-reference"
-        ),
-        last_verified=_VERIFIED_DATE,
+        docs_url=f"{_DOCS}servicenow-reference",
     ),
     **{
         service: _saas(
             "NETSUITE",
+            availability=Availability.GA,
             prereq=(
                 "Token-based auth: consumer key/secret, token id/secret, the Data "
                 "Warehouse Integrator role id, and host/port/account id from the JDBC URL. "
                 "Issued through the NetSuite UI."
             ),
             prereq_auto=False,
+            docs_url=f"{_DOCS}netsuite-reference",
+            last_verified=_VERIFIED_DATE,
         )
         for service in ("netsuite_suiteanalytics", "netsuite")
     },
@@ -562,11 +630,13 @@ CATALOG: dict[str, Target] = {
                 "Viewer, BigQuery Job User, and BigQuery Read Session User, and a JSON key."
             ),
             prereq_auto=False,
+            docs_url=f"{_DOCS}google-analytics-reference",
         )
         for service in ("google_analytics_4", "google_analytics", "google_analytics_360")
     },
     "dynamics_365": _saas(
         "DYNAMICS365",
+        availability=Availability.GA,
         scriptable=Scriptable.YES,
         auth_note="Entra ID client credentials (OAUTH_M2M).",
         prereq=(
@@ -577,104 +647,169 @@ CATALOG: dict[str, Target] = {
         notes=(
             "Meaningful architectural dependency if the customer does not already run Synapse Link."
         ),
+        docs_url=f"{_DOCS}d365-reference",
+        last_verified=_VERIFIED_DATE,
     ),
     "sharepoint": Target(
         connection_type="SHAREPOINT",
         category=Category.FILE,
+        availability=Availability.GA,
         scriptable=Scriptable.YES,
         auth_note="Entra ID client credentials (OAUTH_M2M) observed alongside U2M.",
         preferred_auth="OAUTH_M2M",
         source_prerequisites="Entra ID app registration plus site or folder permissions.",
         prerequisites_automatable=False,
+        docs_url=f"{_DOCS}sharepoint-reference",
+        last_verified=_VERIFIED_DATE,
     ),
     "google_drive": Target(
         connection_type="GOOGLE_DRIVE",
         category=Category.FILE,
+        availability=Availability.GA,
         scriptable=Scriptable.NO,
         auth_note=_U2M,
         source_prerequisites="Google OAuth client plus Drive folder permissions.",
         prerequisites_automatable=False,
+        docs_url=f"{_DOCS}google-drive-reference",
+        last_verified=_VERIFIED_DATE,
     ),
     # -- SaaS: browser consent required, connection cannot be scripted ------
+    # Marketing Hub is GA; the CRM Hub tables most Fivetran HubSpot connections
+    # sync are Beta, so the connector is labelled by its least mature tables.
     "hubspot": _u2m(
         "HUBSPOT",
+        availability=Availability.BETA,
+        fixed_source_schema="default",
         supported_tables=_HUBSPOT_TABLES,
-        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/hubspot-reference",
+        docs_url=f"{_DOCS}hubspot-reference",
         last_verified=_VERIFIED_DATE,
     ),
     "zendesk": _u2m(
         "ZENDESK",
+        availability=Availability.GA,
+        fixed_source_schema="default",
         supported_tables=_ZENDESK_TABLES,
-        docs_url=(
-            "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/"
-            "zendesk-support-reference"
-        ),
+        docs_url=f"{_DOCS}zendesk-support-reference",
         last_verified=_VERIFIED_DATE,
     ),
     "jira": _u2m(
         "JIRA",
+        availability=Availability.BETA,
+        fixed_source_schema="default",
         supported_tables=_JIRA_TABLES,
-        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/jira-reference",
+        docs_url=f"{_DOCS}jira-reference",
         last_verified=_VERIFIED_DATE,
     ),
-    "confluence": _u2m("CONFLUENCE"),
+    "confluence": _u2m(
+        "CONFLUENCE",
+        availability=Availability.GA,
+        docs_url=f"{_DOCS}confluence-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "github": _u2m(
         "GITHUB",
+        availability=Availability.BETA,
         supported_tables=_GITHUB_TABLES,
-        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/github-reference",
+        docs_url=f"{_DOCS}github-limits",
         last_verified=_VERIFIED_DATE,
     ),
-    "smartsheet": _u2m("SMARTSHEET"),
+    "smartsheet": _u2m(
+        "SMARTSHEET",
+        availability=Availability.BETA,
+        docs_url=f"{_DOCS}smartsheet-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "google_ads": _u2m(
         "GOOGLE_ADS",
+        availability=Availability.BETA,
         supported_tables=_GOOGLE_ADS_TABLES,
-        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/google-ads-reference",
+        docs_url=f"{_DOCS}google-ads-reference",
         last_verified=_VERIFIED_DATE,
     ),
-    "tiktok_ads": _u2m("TIKTOK_ADS"),
-    "facebook_ads": _u2m(
-        "META_MARKETING", notes="Named Meta Ads in Databricks; covers Facebook and Instagram Ads."
+    "tiktok_ads": _u2m(
+        "TIKTOK_ADS",
+        availability=Availability.BETA,
+        docs_url=f"{_DOCS}tiktok-ads-reference",
+        last_verified=_VERIFIED_DATE,
     ),
-    "instagram_business": _u2m("META_MARKETING"),
+    "facebook_ads": _u2m(
+        "META_MARKETING",
+        availability=Availability.BETA,
+        notes="Named Meta Ads in Databricks; covers Facebook and Instagram Ads.",
+        docs_url=f"{_DOCS}meta-ads-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
+    "instagram_business": _u2m(
+        "META_MARKETING",
+        availability=Availability.BETA,
+        docs_url=f"{_DOCS}meta-ads-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "salesforce_marketing_cloud": _saas(
-        "SALESFORCE_MARKETING_CLOUD", notes="Distinct managed connector; auth mode unverified."
+        "SALESFORCE_MARKETING_CLOUD",
+        availability=Availability.BETA,
+        notes="Distinct managed connector; auth mode unverified.",
+        docs_url=f"{_DOCS}sfmc-reference",
+        last_verified=_VERIFIED_DATE,
     ),
     # -- SaaS: connector type confirmed against the SDK enum, auth mode not --
     #
     # These are absent from the browser-OAuth-only list Databricks publishes, and
     # Databricks states most SaaS connections can be created programmatically, so
-    # they are modelled as scriptable. Neither the release state nor the auth mode
-    # was confirmed per connector, so both carry the usual unverified caveat.
+    # they are modelled as scriptable. Each reference page marks the connector
+    # Beta; the auth mode was not confirmed per connector.
     **{
-        service: _saas(connection_type, notes=_TYPE_ONLY_VERIFIED)
-        for service, connection_type in (
-            ("aha", "AHA"),
-            ("amplitude", "AMPLITUDE"),
-            ("google_search_console", "GOOGLE_SEARCH_CONSOLE"),
-            ("marketo", "MARKETO"),
-            ("monday", "MONDAY_COM"),
-            ("notion", "NOTION"),
-            ("outlook", "OUTLOOK"),
-            ("pendo", "PENDO"),
-            ("reddit_ads", "REDDIT_ADS"),
-            ("sendgrid", "SENDGRID"),
-            ("square", "SQUARE"),
-            ("zoho_books", "ZOHO_BOOKS"),
+        service: _saas(
+            connection_type,
+            availability=Availability.BETA,
+            notes=_TYPE_ONLY_VERIFIED,
+            docs_url=f"{_DOCS}{slug}-reference",
+            last_verified=_VERIFIED_DATE,
+        )
+        for service, connection_type, slug in (
+            ("aha", "AHA", "aha"),
+            ("amplitude", "AMPLITUDE", "amplitude"),
+            ("google_search_console", "GOOGLE_SEARCH_CONSOLE", "google-search-console"),
+            ("marketo", "MARKETO", "marketo"),
+            ("monday", "MONDAY_COM", "monday-com"),
+            ("notion", "NOTION", "notion"),
+            ("outlook", "OUTLOOK", "outlook"),
+            ("pendo", "PENDO", "pendo"),
+            ("reddit_ads", "REDDIT_ADS", "reddit-ads"),
+            ("sendgrid", "SENDGRID", "sendgrid"),
+            ("square", "SQUARE", "square"),
+            ("zoho_books", "ZOHO_BOOKS", "zoho-books"),
         )
     },
+    "anaplan": _saas(
+        "ANAPLAN",
+        availability=Availability.BETA,
+        scriptable=Scriptable.CONDITIONAL,
+        auth_note=(
+            "Certificate authentication only: an Anaplan admin issues a CA certificate (PEM) "
+            "and its private key for the connection. Model data (modules, lists, exports) is "
+            "not covered."
+        ),
+        prereq_auto=False,
+        fixed_source_schema="default",
+        supported_tables=_ANAPLAN_TABLES,
+        docs_url=f"{_DOCS}anaplan-reference",
+        last_verified=_VERIFIED_DATE,
+    ),
     "pagerduty": _saas(
         "PAGERDUTY",
         availability=Availability.BETA,
         fixed_source_schema="default",
         supported_tables=_PAGERDUTY_TABLES,
-        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/pagerduty-reference",
-        last_verified="2026-11-16",
+        docs_url=f"{_DOCS}pagerduty-reference",
+        last_verified=_VERIFIED_DATE,
     ),
     "linkedin_ads": _saas(
         "LINKEDIN_ADS",
+        availability=Availability.BETA,
         notes=_TYPE_ONLY_VERIFIED,
         supported_tables=_LINKEDIN_ADS_TABLES,
-        docs_url="https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/linkedin-ads-reference",
+        docs_url=f"{_DOCS}linkedin-ads-reference",
         last_verified=_VERIFIED_DATE,
     ),
     # -- No managed connector: a different architecture is the answer -------
@@ -686,6 +821,7 @@ CATALOG: dict[str, Target] = {
                 "Object storage is not a Lakeflow Connect managed connector, but it is a "
                 "well-trodden path."
             ),
+            docs_url=f"{_INGESTION_DOCS}cloud-object-storage/auto-loader/",
         )
         for service in ("s3", "gcs", "azure_blob_storage", "azure_data_lake_storage")
     },
@@ -696,7 +832,10 @@ CATALOG: dict[str, Target] = {
         for service in ("kafka", "confluent_cloud", "aws_msk", "kinesis", "google_pub_sub")
     },
     **{
-        service: _none("Standard SFTP/FTP connector authored as a Lakeflow pipeline.")
+        service: _none(
+            "Standard SFTP/FTP connector authored as a Lakeflow pipeline.",
+            docs_url=f"{_INGESTION_DOCS}sftp",
+        )
         for service in ("sftp", "ftp")
     },
     **{
@@ -706,7 +845,7 @@ CATALOG: dict[str, Target] = {
     **{
         service: _none(
             "No managed connector or federation path yet. Check Lakeflow Community "
-            f"Connectors (Beta, open source; {COMMUNITY_CONNECTORS_URL}) for this source, "
+            f"Connectors (open source; {COMMUNITY_CONNECTORS_URL}) for this source, "
             "or build a custom connector; otherwise keep it on Fivetran or use a partner tool."
         )
         for service in (
@@ -723,6 +862,10 @@ CATALOG: dict[str, Target] = {
         notes=(
             "A SALESFORCE_DATA_CLOUD connection type exists but is U2M-only and not a "
             "managed ingestion connector."
+        ),
+        docs_url=(
+            "https://docs.databricks.com/aws/en/query-federation/"
+            "salesforce-data-cloud-file-sharing"
         ),
     ),
 }
@@ -744,7 +887,7 @@ UNKNOWN = Target(
     scriptable=Scriptable.NA,
     alternative=(
         "Not in this catalog. Check the current managed connector list and Lakeflow "
-        f"Community Connectors (Beta, open source; {COMMUNITY_CONNECTORS_URL}), then build "
+        f"Community Connectors (open source; {COMMUNITY_CONNECTORS_URL}), then build "
         "a custom connector or use a partner tool."
     ),
     notes="Unrecognised Fivetran service id.",
