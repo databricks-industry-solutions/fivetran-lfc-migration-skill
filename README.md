@@ -141,7 +141,9 @@ and `FIVETRAN_API_SECRET_REF`. Off Databricks compute, Unity Catalog secrets are
 read through the Databricks CLI profile; workspace secret scopes can only be
 read on Databricks compute (see Genie Code below). If a secret cannot be read,
 discovery stops with the ref, the store, and the reason, and does not look
-anywhere else.
+anywhere else. `preflight.py --profile <profile-name>` with those variables set
+checks that each Unity Catalog secret exists and is readable, through a
+metadata-only lookup that never requests the value.
 
 For a quick local run you can still export the values directly:
 
@@ -327,7 +329,8 @@ python3 $S/fivetran_consumption.py export -p out/plan.json --mar out/mar.json \
 
 # Stage 5: Generate Databricks Asset Bundle
 python3 $S/generate_bundle.py -p out/plan.json -o out/bundle \
-  --name <customer>-lfc --host https://<workspace>.cloud.databricks.com
+  --name <customer>-lfc --host https://<workspace>.cloud.databricks.com \
+  --databricks-profile <profile>   # optional: --dev-catalog <catalog>
 
 # ──── GATE 2: Review bundle before deploying ────
 
@@ -382,7 +385,13 @@ skill never prices Lakeflow Connect, compares costs, or states a saving.
 ### Stage 5: Generate
 
 Emits a Databricks Asset Bundle with ingestion pipelines, gateway pipelines
-(for CDC sources), companion jobs, and a UC connection creation script.
+(for CDC sources), companion jobs, and a UC connection creation script. The
+`dev` target writes to `<catalog>_dev` unless `--dev-catalog` names another
+catalog; with `--databricks-profile`, the generator checks read-only that the
+dev and prod catalogs exist and warns if one does not. The `prod` target deploys
+under the deploying user's `.bundle` folder (`workspace.root_path`, required by
+`mode: production`). The bundle README lists renamed and Lakeflow Connect-only
+tables.
 
 ### Stage 6: Deploy
 

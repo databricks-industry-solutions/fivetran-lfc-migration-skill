@@ -218,7 +218,12 @@ python3 ${SCRIPTS}/fivetran_discover.py --secret-store scope -o ${FTLFC_OUT}/inv
 ```
 
 Off Databricks compute, add `--databricks-profile <profile>` so Unity Catalog
-secrets are read through the CLI; workspace scopes cannot be read there. With
+secrets are read through the CLI; workspace scopes cannot be read there.
+Preflight (`preflight.py --profile <profile>` with `FIVETRAN_SECRET_STORE=uc`
+and the two ref variables) confirms each Unity Catalog secret exists and is
+readable through a metadata-only lookup that never requests the value, and
+reports not found or permission denied per ref. Scope refs are checked for
+configuration only. With
 no secret store configured, discovery falls back to `FIVETRAN_API_KEY` /
 `FIVETRAN_API_SECRET` if set. Reading Unity Catalog secrets with `dbutils`
 needs serverless environment 4+ or DBR 17.3 LTS+; older compute uses the
@@ -496,8 +501,18 @@ data.
 ```bash
 python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
   -o ${FTLFC_OUT}/bundle --name <customer>-lfc \
-  --host https://<workspace>.cloud.databricks.com
+  --host https://<workspace>.cloud.databricks.com \
+  --dev-catalog <dev_catalog> --databricks-profile <profile>
 ```
+
+`--dev-catalog` sets the catalog the `dev` target writes to (default
+`<target_catalog>_dev`). With `--databricks-profile`, the generator checks
+read-only (`databricks catalogs get`) that the dev and prod catalogs exist and
+warns, without failing, when one does not; the bundle README records the result.
+The bundle never creates catalogs. The `prod` target sets `workspace.root_path`
+to the deploying user's `.bundle` folder, which `mode: production` requires; for
+a team-owned deployment switch it to `/Workspace/Shared/...` and add a `run_as`
+service principal (see `references/bundles.md`).
 
 Produces a bundle the customer keeps in their own repo: one ingestion pipeline
 per connection, a gateway pipeline where gateway-based CDC needs one, and a
@@ -511,7 +526,9 @@ Unity Catalog connections are *not* bundle resources, because credentials must
 not be committed. They are emitted as `scripts/create_connections.sh` with
 `REPLACE_ME` placeholders, to be run once before deploying.
 
-Review the generated YAML against the plan before deploying. Connections that
+Review the generated YAML against the plan before deploying. The bundle README
+lists renamed tables and Lakeflow Connect-only tables (ingested but with no
+Fivetran counterpart) so downstream references can be updated. Connections that
 had blockers (no managed connector) are absent from the bundle by design and
 listed in its README. Browser-OAuth connections are present; create each one
 in Catalog Explorer with the exact name in the README before deploying.
