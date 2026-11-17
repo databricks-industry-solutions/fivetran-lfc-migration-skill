@@ -436,10 +436,15 @@ mean:
   with the Fivetran table whose name matches after ignoring case, underscores,
   and plural endings. Each row in `table_plan` has a `status`: `same_name`,
   `renamed` (Fivetran `incident` becomes `incidents`), `lakeflow_only` (no
-  Fivetran table pairs; still ingested, so remove any the customer does not
-  need), `disabled_in_fivetran` (not ingested), or `not_available` (enabled in
-  Fivetran, no Lakeflow Connect equivalent; not migrated). A connection where
-  nothing pairs is blocked, with the list the connector does offer.
+  Fivetran table pairs), `disabled_in_fivetran` (not ingested), or
+  `not_available` (enabled in Fivetran, no Lakeflow Connect equivalent; not
+  migrated), and `kept` says whether the pipeline ingests it. `lakeflow_only`
+  tables are kept by default only when the connector offers 10 or fewer tables
+  (PagerDuty's list comes over whole; HubSpot's 29 extra tables do not), and a
+  warning lists the rest as not included. If the customer wants them, re-run
+  `plan_migration.py --include-lakeflow-only all` (or `none` to drop them
+  everywhere), then regenerate the bundle. A connection where nothing pairs is
+  blocked, with the list the connector does offer.
 - **Renamed tables.** A renamed table lands under its Lakeflow Connect name,
   not Fivetran's, so views, models, and dashboards that reference the Fivetran
   name need repointing; check column names against the landed table too.

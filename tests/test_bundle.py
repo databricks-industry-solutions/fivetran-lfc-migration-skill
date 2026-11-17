@@ -17,6 +17,8 @@ from ftlfc.bundle import build_bundle
 from ftlfc.mapping import build_plan
 from ftlfc.workspace import WorkspaceError
 
+SAMPLE_INVENTORY = SCRIPTS.parent / "fixtures/inventory.sample.json"
+
 
 def _item(
     *,
@@ -472,6 +474,23 @@ class TestSupportedTableObjects:
         # Paired tables are not listed as Lakeflow Connect-only.
         section = readme.split("## Lakeflow Connect-only tables")[1]
         assert "pagerduty.incidents" not in section
+
+    def test_readme_lists_lakeflow_only_tables_not_included(self) -> None:
+        plan = build_plan(json.loads(SAMPLE_INVENTORY.read_text()), "main_prod")
+        readme = build_bundle(plan, "acme")["README.md"]
+        section = readme.split("## Lakeflow Connect tables not included")[1].split("\n## ")[0]
+        assert "rerun plan_migration.py with --include-lakeflow-only all" in section
+        assert "`deals_pipelines`" in section
+        assert "`deals`," not in section
+        assert "## Lakeflow Connect-only tables" not in readme
+
+    def test_readme_omits_not_included_section_with_all(self) -> None:
+        plan = build_plan(
+            json.loads(SAMPLE_INVENTORY.read_text()), "main_prod", include_lakeflow_only="all"
+        )
+        readme = build_bundle(plan, "acme")["README.md"]
+        assert "## Lakeflow Connect tables not included" not in readme
+        assert "## Lakeflow Connect-only tables" in readme
 
     def test_readme_omits_lakeflow_only_section_without_such_tables(self) -> None:
         assert "Lakeflow Connect-only" not in build_bundle(_plan(_item()), "acme")["README.md"]

@@ -372,7 +372,10 @@ Lakeflow Connect table list (PagerDuty, HubSpot, Zendesk, and others), it pairs
 each Lakeflow Connect table with the Fivetran table of the same name, ignoring
 case, underscores, and plural endings (Fivetran `incident` pairs with
 `incidents`), and reports renamed tables, Lakeflow-only tables, and Fivetran
-tables with no equivalent.
+tables with no equivalent. Lakeflow-only tables are ingested by default only
+when the connector offers 10 or fewer tables; for longer lists (HubSpot,
+Workday HCM) they are listed as not included. `--include-lakeflow-only all`
+adds them, and `none` drops them everywhere.
 
 ### Stage 4: Consumption
 

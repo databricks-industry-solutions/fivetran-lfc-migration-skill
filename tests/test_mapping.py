@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,7 +22,16 @@ from ftlfc.catalog import (
     Scriptable,
     lookup,
 )
-from ftlfc.mapping import CRON_BY_MINUTES, build_plan, name_key, to_identifier
+from ftlfc.mapping import (
+    CRON_BY_MINUTES,
+    LAKEFLOW_ONLY_AUTO_LIMIT,
+    build_plan,
+    keep_lakeflow_only,
+    name_key,
+    to_identifier,
+)
+
+SAMPLE_INVENTORY = SCRIPTS.parent / "fixtures/inventory.sample.json"
 
 
 class TestCatalog:
@@ -465,14 +475,101 @@ _PD_UNPAIRED = (
 )
 
 
-def _pd_plan(*tables: dict) -> dict:
-    return build_plan(_inventory(_connection(service="pagerduty", objects=list(tables))), "main")
+def _pd_plan(*tables: dict, include_lakeflow_only: str = "auto") -> dict:
+    return build_plan(
+        _inventory(_connection(service="pagerduty", objects=list(tables))),
+        "main",
+        include_lakeflow_only=include_lakeflow_only,
+    )
+
+
+def _sample_plan(include_lakeflow_only: str = "auto") -> dict:
+    inventory = json.loads(SAMPLE_INVENTORY.read_text())
+    return build_plan(inventory, "main_prod", include_lakeflow_only=include_lakeflow_only)
+
+
+def _item_for(plan: dict, service: str) -> dict:
+    return next(i for i in plan["items"] if i["fivetran"]["service"] == service)
 
 
 def _statuses(item: dict) -> dict:
     return {
         (row["fivetran_table"], row["lakeflow_table"]): row["status"] for row in item["table_plan"]
     }
+
+
+class TestLakeflowOnlyCap:
+    """Lakeflow-only tables come over by default only for short connector lists."""
+
+    def test_auto_keeps_short_lists_and_skips_long_ones(self) -> None:
+        assert len(lookup("pagerduty").supported_tables) <= LAKEFLOW_ONLY_AUTO_LIMIT
+        assert keep_lakeflow_only(lookup("pagerduty"))
+        assert not keep_lakeflow_only(lookup("hubspot"))
+        assert not keep_lakeflow_only(lookup("workday_hcm"))
+        assert keep_lakeflow_only(lookup("hubspot"), "all")
+        assert not keep_lakeflow_only(lookup("pagerduty"), "none")
+
+    def test_pagerduty_keeps_priorities_by_default(self) -> None:
+        item = _pd_plan(*(_pd_table(t) for t in _PD_PAIRED))["items"][0]
+        assert "priorities" in {o["source_table"] for o in item["objects"]}
+        assert item["table_counts"]["tables"] == 10
+
+    def test_none_drops_pagerduty_priorities(self) -> None:
+        plan = _pd_plan(*(_pd_table(t) for t in _PD_PAIRED), include_lakeflow_only="none")
+        item = plan["items"][0]
+        assert "priorities" not in {o["source_table"] for o in item["objects"]}
+        assert item["table_counts"]["tables"] == 9
+        assert item["table_counts"]["lakeflow_skipped"] == 1
+        assert {r["lakeflow_table"]: r["kept"] for r in item["table_plan"]}["priorities"] is False
+        assert any(
+            "1 PAGERDUTY table(s) match no table Fivetran lists and are not included: "
+            "priorities. To ingest them, re-run plan_migration.py with "
+            "--include-lakeflow-only all." in w
+            for w in item["warnings"]
+        )
+
+    def test_hubspot_sample_skips_lakeflow_only_tables_by_default(self) -> None:
+        plan = _sample_plan()
+        item = _item_for(plan, "hubspot")
+        assert [o["source_table"] for o in item["objects"]] == ["deals"]
+        assert item["table_counts"]["lakeflow_only"] == 0
+        assert item["table_counts"]["lakeflow_skipped"] == 29
+        assert plan["summary"]["tables_lakeflow_skipped"] == 29
+        assert plan["include_lakeflow_only"] == "auto"
+        warning = next(w for w in item["warnings"] if "are not included" in w)
+        assert warning.startswith("29 HUBSPOT table(s) match no table Fivetran lists")
+        assert "and 19 more" in warning
+        assert warning.endswith(f"See {lookup('hubspot').docs_url}")
+
+    def test_all_restores_hubspot_lakeflow_only_tables(self) -> None:
+        plan = _sample_plan("all")
+        item = _item_for(plan, "hubspot")
+        assert len(item["objects"]) == 30
+        assert item["table_counts"]["lakeflow_only"] == 29
+        assert item["table_counts"]["lakeflow_skipped"] == 0
+        assert any("are ingested too" in w for w in item["warnings"])
+        assert not any("are not included" in w for w in item["warnings"])
+
+    def test_workday_hcm_skips_by_default(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="workday_hcm", objects=[_table(source_table="worker")])),
+            "main",
+        )
+        item = plan["items"][0]
+        assert item["table_counts"]["tables"] == 1
+        assert item["table_counts"]["lakeflow_skipped"] == 136
+
+    def test_rejects_an_unknown_mode(self) -> None:
+        with pytest.raises(ValueError, match="include_lakeflow_only must be one of"):
+            build_plan(_inventory(_connection()), "main", include_lakeflow_only="some")
+
+    def test_cli_flag_reaches_the_plan(self, tmp_path: Path) -> None:
+        out = tmp_path / "plan.json"
+        args = ["-i", str(SAMPLE_INVENTORY), "-c", "main_prod", "-o", str(out)]
+        assert plan_migration.main([*args, "--include-lakeflow-only", "all"]) == 0
+        plan = json.loads(out.read_text())
+        assert plan["include_lakeflow_only"] == "all"
+        assert plan["summary"]["tables_lakeflow_skipped"] == 0
 
 
 class TestNameKey:
@@ -507,6 +604,7 @@ class TestSupportedTablePairing:
             "paired": 9,
             "renamed": 7,
             "lakeflow_only": 1,
+            "lakeflow_skipped": 0,
             "not_available": len(_PD_UNPAIRED),
             "disabled_in_fivetran": 0,
         }

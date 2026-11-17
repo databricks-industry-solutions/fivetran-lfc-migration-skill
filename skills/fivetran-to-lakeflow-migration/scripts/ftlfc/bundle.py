@@ -675,6 +675,34 @@ def _bundle_readme(
                 f"`{item['target']['pipeline_name']}` |"
             )
 
+    skipped = []
+    for item in migratable:
+        names = sorted(
+            r["lakeflow_table"]
+            for r in item.get("table_plan") or []
+            if r["status"] == "lakeflow_only" and not r.get("kept", True)
+        )
+        if names:
+            skipped.append((item, names))
+    if skipped:
+        lines += [
+            "",
+            "## Lakeflow Connect tables not included",
+            "",
+            (
+                "These connectors offer more tables than Fivetran synced. The extra tables "
+                "are not included; rerun plan_migration.py with --include-lakeflow-only all, "
+                "then generate_bundle.py, to add them."
+            ),
+            "",
+            "| Pipeline | Tables |",
+            "|---|---|",
+        ]
+        for item, names in skipped:
+            lines.append(
+                f"| `{item['target']['pipeline_name']}` | {', '.join(f'`{n}`' for n in names)} |"
+            )
+
     if blocked:
         lines += [
             "",
