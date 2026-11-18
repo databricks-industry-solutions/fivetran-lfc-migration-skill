@@ -11,8 +11,8 @@ Three inputs, all optional except the plan:
   ``usage_cost`` / ``credits_used`` rows Fivetran billed.
 - ``fivetran_spend.json``: the spend the customer shared, recorded as given.
 
-``consumption_rows`` has one row per connection in the input shape of the
-Lakeflow Connect cost estimator: ``source_type``, ``num_rows`` per run,
+``consumption_rows`` has one row per connection with its shape and volume:
+``source_type``, ``num_rows`` per run,
 ``num_flows`` (tables), ``cloud``, ``region``.
 """
 
@@ -71,8 +71,8 @@ README_TEXT = """\
 Fivetran consumption export from the fivetran-to-lakeflow-migration skill, for the Databricks
 account team.
 
-connections.csv: one row per Fivetran connection in the plan. source_type, num_rows, num_flows,
-  cloud, and region match the Lakeflow Connect cost estimator inputs. num_rows = latest full
+connections.csv: one row per Fivetran connection in the plan with source_type, num_rows,
+  num_flows (tables), cloud, and region. num_rows = latest full
   month's paid MAR / runs_per_month, a floor (MAR counts each key once a month); empty for
   continuous schedules or without MAR. runs_per_month assumes a 30-day month.
 fivetran_billing.csv: Fivetran usage_cost / credits_used per destination and month from the

@@ -381,8 +381,7 @@ adds them, and `none` drops them everywhere.
 
 Prints the recorded Fivetran consumption and spend for Gate 1. If the customer
 agrees, writes a CSV export for their Databricks account team:
-`connections.csv` (one row per connection with the Lakeflow Connect cost
-estimator inputs: `source_type`, `num_rows` per run, `num_flows`, `cloud`,
+`connections.csv` (one row per connection with `source_type`, `num_rows` per run, `num_flows`, `cloud`,
 `region`), `fivetran_billing.csv`, `mar_by_table.csv`, and a `README.txt`. The
 skill never prices Lakeflow Connect, compares costs, or states a saving.
 
@@ -563,7 +562,7 @@ a pipeline and job.
 
 **The skill records cost; it does not estimate it.** It captures Fivetran MAR,
 billed amounts, and any spend the customer shares, exactly as given, and exports
-them in the input shape of the Lakeflow Connect cost estimator. The Databricks
+them with each connection's source type, table count, and volume. The Databricks
 account team runs any cost modelling outside the skill. The export is written
 only after the customer agrees to it.
 

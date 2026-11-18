@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1] / "skills/fivetran-to-lakeflow-migration"
+REPO = Path(__file__).resolve().parents[1]
+SKILL = REPO / "skills/fivetran-to-lakeflow-migration"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 import fivetran_consumption
@@ -30,8 +31,8 @@ COST_COMPARISON = [
     r"\blist[_ ]prices?\b",
     r"\bcost (comparison|projection|estimate)s?\b",
     r"\b(estimated|projected) (monthly |annual )?(cost|spend)\b",
-    # The export names the account team's estimator as the shape it follows.
-    r"lakeflow connect (would |will )?costs?\b(?! estimator)",
+    r"\bcost estimators?\b",
+    r"lakeflow connect (would |will )?costs?\b",
     r"\bcompared? (to|with) fivetran\b",
     r"\$\s?[\d,.]+\s*(/|per)\s*(month|mo|year|yr)\b.*\b(lakeflow|databricks)\b",
 ]
@@ -107,6 +108,16 @@ def test_generated_output_never_compares_cost(
     assert found == {}
 
 
+def test_docs_and_scripts_never_point_to_a_cost_estimator() -> None:
+    paths = [REPO / "README.md", *SKILL.rglob("*.md"), *SKILL.rglob("*.py")]
+    found = [
+        str(p.relative_to(REPO))
+        for p in paths
+        if re.search(r"\bcost estimators?\b", p.read_text(), re.IGNORECASE)
+    ]
+    assert found == []
+
+
 def test_recorded_spend_is_reported_as_given(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     texts = _all_outputs(tmp_path, capsys)
     assert "4200" in texts["summary"] or "4,200" in texts["summary"]
@@ -119,6 +130,7 @@ def test_recorded_spend_is_reported_as_given(tmp_path: Path, capsys: pytest.Capt
         "Estimated monthly cost: 40 DBUs.",
         "Moving saves you 60%.",
         "Lakeflow Connect is cheaper.",
+        "These columns match the Lakeflow Connect cost estimator inputs.",
     ],
 )
 def test_the_check_catches_comparison_language(sentence: str) -> None:

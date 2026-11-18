@@ -485,8 +485,8 @@ python3 ${SCRIPTS}/fivetran_consumption.py export -p ${FTLFC_OUT}/plan.json \
 
 It writes `fivetran_consumption_<date>/` with:
 
-- `connections.csv` — one row per planned connection in the input shape of the
-  Lakeflow Connect cost estimator: `source_type`, `num_rows` per run,
+- `connections.csv` — one row per planned connection with its shape and
+  volume: `source_type`, `num_rows` per run,
   `num_flows` (tables), `cloud`, `region`, plus `runs_per_month` and paid and
   total MAR. `num_rows` is the latest full month's paid MAR divided by runs per
   month (`43200 / sync_minutes`). MAR counts each key once a month, so it is a
