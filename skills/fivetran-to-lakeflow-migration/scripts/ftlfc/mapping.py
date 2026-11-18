@@ -78,13 +78,16 @@ def to_identifier(*parts: str) -> str:
 def name_key(table: str) -> str:
     """Normalise a table name so Fivetran's and Lakeflow Connect's spellings meet.
 
-    Case and underscores are ignored, then a trailing ``ies`` becomes ``y`` and a
+    Case and underscores are ignored, then a trailing ``ies`` becomes ``y``,
+    ``es`` after ``ss``, ``us``, ``x``, ``z``, ``ch`` or ``sh`` is dropped, and a
     trailing ``s`` is dropped, so ``incident`` meets ``incidents``,
-    ``escalation_policy`` meets ``escalation_policies``, and ``on_call`` meets
-    ``oncalls``.
+    ``escalation_policy`` meets ``escalation_policies``, ``branch`` meets
+    ``branches``, ``custom_status`` meets ``custom_statuses``, and ``on_call``
+    meets ``oncalls``.
     """
     key = table.lower().replace("_", "")
     key = re.sub(r"ies$", "y", key)
+    key = re.sub(r"(ss|us|x|z|ch|sh)es$", r"\1", key)
     return re.sub(r"s$", "", key)
 
 

@@ -635,6 +635,11 @@ class TestNameKey:
             ("audit_record", "audit_records"),
             ("log_entries", "log_entries"),
             ("Users", "users"),
+            ("user", "users"),
+            ("priority", "priorities"),
+            ("branch", "branches"),
+            ("custom_status", "custom_statuses"),
+            ("deployment_status", "deployment_statuses"),
         ],
     )
     def test_fivetran_and_lakeflow_spellings_meet(self, fivetran: str, lakeflow: str) -> None:
@@ -642,6 +647,37 @@ class TestNameKey:
 
     def test_distinct_tables_stay_distinct(self) -> None:
         assert name_key("incident_log_entry") != name_key("log_entries")
+
+    @pytest.mark.parametrize(
+        "target",
+        [t for t in dict.fromkeys(CATALOG.values()) if t.supported_tables],
+        ids=lambda t: t.connection_type,
+    )
+    def test_no_two_catalog_tables_share_a_key(self, target) -> None:
+        keys: dict[str, list[str]] = {}
+        for table in target.supported_tables:
+            keys.setdefault(name_key(table), []).append(table)
+        assert {k: v for k, v in keys.items() if len(v) > 1} == {}
+
+    def test_github_branch_pairs_with_branches(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="github",
+                    objects=[
+                        _table(source_table="branch"),
+                        _table(source_table="deployment_status"),
+                    ],
+                )
+            ),
+            "main",
+        )
+        item = plan["items"][0]
+        statuses = _statuses(item)
+        assert statuses[("branch", "branches")] == "renamed"
+        assert statuses[("deployment_status", "deployment_statuses")] == "renamed"
+        assert not any(s == "not_available" for s in statuses.values())
+        assert {"branches", "deployment_statuses"} <= {o["source_table"] for o in item["objects"]}
 
 
 class TestSupportedTablePairing:
