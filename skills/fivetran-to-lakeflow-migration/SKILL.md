@@ -115,7 +115,7 @@ Present the following to the customer before any bundle is generated:
    tables are ingested though no Fivetran table pairs with them.
 5. **Warnings** — hashed columns, private networking, browser-only OAuth,
    connectors not yet GA, and database tables Fivetran confirms have no
-   primary key. Present Beta / Public Preview notes as something to confirm
+   primary key (name every one, by schema and table). Present Beta / Public Preview notes as something to confirm
    in the target workspace, never as a finding that the connector is off:
    the planner cannot see the workspace.
 6. **Fivetran consumption and spend** — the `fivetran_spend` and

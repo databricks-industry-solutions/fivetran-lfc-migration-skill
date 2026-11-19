@@ -291,7 +291,9 @@ class TestBuildPlan:
         item = plan["items"][0]
         notes = [w for w in item["warnings"] if "primary key" in w.lower()]
         assert len(notes) == 1
-        assert "2 table(s)" in notes[0] and "dbo.audit_log" in notes[0]
+        assert "2 table(s)" in notes[0]
+        assert "dbo.audit_log" in notes[0] and "dbo.events" in notes[0]
+        assert "dbo.Customers" not in notes[0]
         assert "CDC instead of change tracking" in notes[0]
         by_table = {o["source_table"]: o["table_configuration"] for o in item["objects"]}
         assert by_table["Customers"]["primary_keys"] == ["Id"]
