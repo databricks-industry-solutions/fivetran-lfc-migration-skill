@@ -641,7 +641,7 @@ def _table_warnings(
                 f"lists and are ingested too: {_sample(lakeflow_only)}. Remove any you do "
                 "not need from the bundle."
             )
-    elif paired and lakeflow_only:
+    elif paired and lakeflow_only and not blocked:
         warnings.append(
             f"{len(lakeflow_only)} {connection_type} table(s) match no table Fivetran lists "
             f"and are not included: {_sample(lakeflow_only)}. To ingest them, re-run "

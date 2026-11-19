@@ -627,6 +627,18 @@ class TestLakeflowOnlyCap:
         assert any("needs a PAGERDUTY connection" in b for b in item["blockers"])
         assert not any("are ingested too" in w for w in item["warnings"])
 
+    def test_blocked_reuse_does_not_suggest_including_lakeflow_only_tables(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "missing_conn"},
+            lookup_connection=lambda name: None,
+            include_lakeflow_only="none",
+        )
+        item = plan["items"][0]
+        assert any("does not exist" in b for b in item["blockers"])
+        assert not any("are not included" in w for w in item["warnings"])
+
     def test_verified_reuse_still_reports_lakeflow_only_tables_ingested(self) -> None:
         plan = build_plan(
             _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
