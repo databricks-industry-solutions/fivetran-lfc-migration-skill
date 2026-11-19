@@ -526,8 +526,9 @@ class TestLakeflowOnlyCap:
         assert {r["lakeflow_table"]: r["kept"] for r in item["table_plan"]}["priorities"] is False
         assert any(
             "1 PAGERDUTY table(s) match no table Fivetran lists and are not included: "
-            "priorities. To ingest them, re-run plan_migration.py with "
-            "--include-lakeflow-only all." in w
+            "priorities. To ingest them, add them to this pipeline in the bundle, or re-run "
+            "plan_migration.py with --include-lakeflow-only all, which applies to every "
+            "connection." in w
             for w in item["warnings"]
         )
 

@@ -644,8 +644,9 @@ def _table_warnings(
     elif paired and lakeflow_only and not blocked:
         warnings.append(
             f"{len(lakeflow_only)} {connection_type} table(s) match no table Fivetran lists "
-            f"and are not included: {_sample(lakeflow_only)}. To ingest them, re-run "
-            f"plan_migration.py with --include-lakeflow-only all.{_see(target)}"
+            f"and are not included: {_sample(lakeflow_only)}. To ingest them, add them to "
+            "this pipeline in the bundle, or re-run plan_migration.py with "
+            f"--include-lakeflow-only all, which applies to every connection.{_see(target)}"
         )
 
     not_available = sorted(

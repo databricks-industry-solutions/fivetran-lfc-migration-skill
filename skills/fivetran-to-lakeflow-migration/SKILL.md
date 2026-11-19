@@ -442,9 +442,12 @@ mean:
   migrated), and `kept` says whether the pipeline ingests it. `lakeflow_only`
   tables are kept by default only when the connector offers 10 or fewer tables
   (PagerDuty's list comes over whole; HubSpot's 29 extra tables do not), and a
-  warning lists the rest as not included. If the customer wants them, re-run
-  `plan_migration.py --include-lakeflow-only all` (or `none` to drop them
-  everywhere), then regenerate the bundle. A connection where nothing pairs is
+  warning lists the rest as not included. If the customer wants them, say that
+  `--include-lakeflow-only all` applies to every connection, so it adds every
+  connector's unmatched tables, and re-run `plan_migration.py` with it only
+  after they confirm (or `none` to drop them everywhere), then regenerate the
+  bundle. For one connector's tables only, keep `auto` and add them to that
+  pipeline in the bundle. A connection where nothing pairs is
   blocked, with the list the connector does offer.
 - **Renamed tables.** A renamed table lands under its Lakeflow Connect name,
   not Fivetran's, so views, models, and dashboards that reference the Fivetran
