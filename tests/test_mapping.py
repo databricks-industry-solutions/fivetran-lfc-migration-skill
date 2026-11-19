@@ -27,7 +27,8 @@ from ftlfc.mapping import (
     LAKEFLOW_ONLY_AUTO_LIMIT,
     build_plan,
     keep_lakeflow_only,
-    name_key,
+    name_keys,
+    pair_tables,
     to_identifier,
 )
 
@@ -613,6 +614,32 @@ class TestLakeflowOnlyCap:
         assert item["table_counts"]["tables"] == 0
         assert item["table_counts"]["paired"] == 1
         assert not any(r["kept"] for r in item["table_plan"])
+        assert not any("are ingested too" in w for w in item["warnings"])
+
+    def test_wrong_type_reuse_does_not_claim_lakeflow_only_tables_are_ingested(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "sf_conn"},
+            lookup_connection=lambda name: {"connection_type": "SALESFORCE"},
+        )
+        item = plan["items"][0]
+        assert any("needs a PAGERDUTY connection" in b for b in item["blockers"])
+        assert not any("are ingested too" in w for w in item["warnings"])
+
+    def test_verified_reuse_still_reports_lakeflow_only_tables_ingested(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "pd_conn"},
+            lookup_connection=lambda name: {
+                "connection_type": "API_SOURCE",
+                "options": {"source_name": "pagerduty"},
+            },
+        )
+        item = plan["items"][0]
+        assert item["blockers"] == []
+        assert any("are ingested too" in w for w in item["warnings"])
 
     def test_rejects_an_unknown_mode(self) -> None:
         with pytest.raises(ValueError, match="include_lakeflow_only must be one of"):
@@ -642,13 +669,44 @@ class TestNameKey:
             ("branch", "branches"),
             ("custom_status", "custom_statuses"),
             ("deployment_status", "deployment_statuses"),
+            ("compensation_bonus_tranche", "compensation_bonus_tranches"),
+            ("compensation_bonus_tranches", "compensation_bonus_tranche"),
+            ("cause", "causes"),
+            ("cache", "caches"),
         ],
     )
     def test_fivetran_and_lakeflow_spellings_meet(self, fivetran: str, lakeflow: str) -> None:
-        assert name_key(fivetran) == name_key(lakeflow)
+        assert name_keys(fivetran) & name_keys(lakeflow)
 
     def test_distinct_tables_stay_distinct(self) -> None:
-        assert name_key("incident_log_entry") != name_key("log_entries")
+        assert not name_keys("incident_log_entry") & name_keys("log_entries")
+
+    @pytest.mark.parametrize(
+        "fivetran,lakeflow",
+        [
+            ("compensation_bonus_tranches", "compensation_bonus_tranche"),
+            ("compensation_bonus_tranche", "compensation_bonus_tranches"),
+            ("cause", "causes"),
+            ("cache", "caches"),
+            ("branch", "branches"),
+            ("custom_status", "custom_statuses"),
+            ("deployment_statuses", "deployment_status"),
+            ("incident", "incidents"),
+            ("escalation_policy", "escalation_policies"),
+            ("priority", "priorities"),
+        ],
+    )
+    def test_pair_tables_renames_either_plural_form(self, fivetran: str, lakeflow: str) -> None:
+        rows = pair_tables([_table(source_table=fivetran)], frozenset({lakeflow}))
+        pairs = [(r["lakeflow_table"], r["fivetran"]["source_table"], r["status"]) for r in rows]
+        assert pairs == [(lakeflow, fivetran, "renamed")]
+
+    def test_pair_tables_prefers_the_exact_name(self) -> None:
+        rows = pair_tables(
+            [_table(source_table="cause"), _table(source_table="causes")], frozenset({"causes"})
+        )
+        statuses = {((r["fivetran"] or {}).get("source_table"), r["status"]) for r in rows}
+        assert statuses == {("causes", "same_name"), ("cause", "not_available")}
 
     @pytest.mark.parametrize(
         "target",
@@ -658,7 +716,8 @@ class TestNameKey:
     def test_no_two_catalog_tables_share_a_key(self, target) -> None:
         keys: dict[str, list[str]] = {}
         for table in target.supported_tables:
-            keys.setdefault(name_key(table), []).append(table)
+            for key in name_keys(table):
+                keys.setdefault(key, []).append(table)
         assert {k: v for k, v in keys.items() if len(v) > 1} == {}
 
     def test_github_branch_pairs_with_branches(self) -> None:

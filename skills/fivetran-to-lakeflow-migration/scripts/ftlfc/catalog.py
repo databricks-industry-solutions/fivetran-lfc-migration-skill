@@ -110,7 +110,7 @@ class Target:
     #: ServiceNow) or the table list has not been cataloged yet.  When populated,
     #: the plan starts from this list and pairs each table with the Fivetran
     #: table whose name matches after ignoring case, underscores, and plural
-    #: endings (see ``mapping.name_key``).
+    #: endings (see ``mapping.name_keys``).
     supported_tables: frozenset[str] | None = None
     #: URL to the connector reference page listing supported tables.
     docs_url: str = ""
