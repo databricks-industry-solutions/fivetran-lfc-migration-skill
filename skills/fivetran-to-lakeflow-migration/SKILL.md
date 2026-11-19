@@ -115,7 +115,8 @@ Present the following to the customer before any bundle is generated:
    tables are ingested though no Fivetran table pairs with them.
 5. **Warnings** — hashed columns, private networking, browser-only OAuth,
    connectors not yet GA, and database tables Fivetran confirms have no
-   primary key. Present Beta / Public Preview notes as something to confirm
+   primary key (name each table the warning lists, by schema and table, and
+   give the count of the rest). Present Beta / Public Preview notes as something to confirm
    in the target workspace, never as a finding that the connector is off:
    the planner cannot see the workspace.
 6. **Fivetran consumption and spend** — the `fivetran_spend` and
@@ -200,8 +201,9 @@ and only after reconciliation passes.
 
 **Connector availability changes constantly.** The catalog in
 `${SCRIPTS}/ftlfc/catalog.py` marks entries `UNVERIFIED` where the release state
-could not be confirmed. Before committing to a date with a customer, check the
-[current connector list](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/)
+could not be confirmed, and each managed connector carries a `docs_url` (the
+Databricks page that lists its supported tables) that the plan's warnings and
+blockers link. Before committing to a date with a customer, check that page
 and the workspace's own Previews page.
 
 ## Stage 1: Discover (Assessment)
@@ -416,9 +418,9 @@ mean:
   have no key: those need the connector's keyless-table setup (for SQL
   Server, CDC instead of change tracking).
 - **Beta / Public Preview.** The catalog labels release state; it does not
-  check the workspace. Beta connectors are turned on from the workspace
-  Previews page, some Public Preview ones through the account team. Ask the
-  customer to confirm rather than asserting it is disabled.
+  check the workspace. The note links the connector's docs page, which says
+  how to turn it on (the Previews page, a named preview, or the account team).
+  Ask the customer to confirm rather than asserting it is disabled.
 - **Hashed columns.** Fivetran hashes at ingest; Lakeflow Connect has no
   equivalent. Reproduce with a downstream masking policy, and tell the customer
   the raw value will land in the bronze table.
@@ -428,17 +430,25 @@ mean:
   another path, not a dead end. Object storage goes to Auto Loader, message
   buses to a streaming source, warehouses to federation, and other sources
   may have a [Lakeflow Community Connector](https://docs.databricks.com/aws/en/ingestion/community-connectors)
-  (Beta, open source,
+  (open source,
   [databrickslabs/lakeflow-community-connectors](https://github.com/databrickslabs/lakeflow-community-connectors)).
 - **Fixed table lists.** For connectors with `supported_tables` in the
   catalog, the plan starts from the Lakeflow Connect list and pairs each table
   with the Fivetran table whose name matches after ignoring case, underscores,
   and plural endings. Each row in `table_plan` has a `status`: `same_name`,
   `renamed` (Fivetran `incident` becomes `incidents`), `lakeflow_only` (no
-  Fivetran table pairs; still ingested, so remove any the customer does not
-  need), `disabled_in_fivetran` (not ingested), or `not_available` (enabled in
-  Fivetran, no Lakeflow Connect equivalent; not migrated). A connection where
-  nothing pairs is blocked, with the list the connector does offer.
+  Fivetran table pairs), `disabled_in_fivetran` (not ingested), or
+  `not_available` (enabled in Fivetran, no Lakeflow Connect equivalent; not
+  migrated), and `kept` says whether the pipeline ingests it. `lakeflow_only`
+  tables are kept by default only when the connector offers 10 or fewer tables
+  (PagerDuty's list comes over whole; HubSpot's 29 extra tables do not), and a
+  warning lists the rest as not included. If the customer wants them, say that
+  `--include-lakeflow-only all` applies to every connection, so it adds every
+  connector's unmatched tables, and re-run `plan_migration.py` with it only
+  after they confirm (or `none` to drop them everywhere), then regenerate the
+  bundle. For one connector's tables only, keep `auto` and add them to that
+  pipeline in the bundle. A connection where nothing pairs is
+  blocked, with the list the connector does offer.
 - **Renamed tables.** A renamed table lands under its Lakeflow Connect name,
   not Fivetran's, so views, models, and dashboards that reference the Fivetran
   name need repointing; check column names against the landed table too.
@@ -479,8 +489,8 @@ python3 ${SCRIPTS}/fivetran_consumption.py export -p ${FTLFC_OUT}/plan.json \
 
 It writes `fivetran_consumption_<date>/` with:
 
-- `connections.csv` — one row per planned connection in the input shape of the
-  Lakeflow Connect cost estimator: `source_type`, `num_rows` per run,
+- `connections.csv` — one row per planned connection with its shape and
+  volume: `source_type`, `num_rows` per run,
   `num_flows` (tables), `cloud`, `region`, plus `runs_per_month` and paid and
   total MAR. `num_rows` is the latest full month's paid MAR divided by runs per
   month (`43200 / sync_minutes`). MAR counts each key once a month, so it is a

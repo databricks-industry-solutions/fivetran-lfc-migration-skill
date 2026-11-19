@@ -1,6 +1,6 @@
 # Lakeflow Connect: Managed Connector Coverage & Source-Side Prerequisites
 
-**Research date:** 2026-08-24
+**Research date:** 2026-08-24 (snapshot; the current release state, supported tables, and docs link for each connector are in `scripts/ftlfc/catalog.py`, re-verified 2026-11-17)
 **Primary sources:** `docs.databricks.com` (AWS variant unless noted). Azure (`learn.microsoft.com/azure/databricks`) and GCP variants of the same pages carry equivalent content.
 
 > **Availability caveat — read this first.** The Lakeflow Connect connector catalog and release states change frequently. The managed SaaS connector index page was last updated **2026-08-16**, the database connector index **2026-08-04**. Databricks' own overview page states only that "managed connectors in Lakeflow Connect are in various release states" — it does **not** publish a consolidated GA/Preview/Beta matrix. Release state is documented per-connector, in an admonition at the top of each connector's page. **Any skill or automation built on this document must re-verify availability against the source-of-truth index pages cited below before relying on it.** Rows below marked `unverified` were not individually confirmed within the research budget.

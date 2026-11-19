@@ -49,10 +49,18 @@ CONTINUOUS_THRESHOLD_MINUTES = 5
 
 DEFAULT_SYNC_MINUTES = 360
 
-#: Table statuses the generated pipeline ingests. ``disabled_in_fivetran`` and
+#: Table statuses the generated pipeline ingests. ``lakeflow_only`` is ingested
+#: only when ``keep_lakeflow_only`` allows it; ``disabled_in_fivetran`` and
 #: ``not_available`` are reported but never ingested.
-KEPT_STATUSES = frozenset({"same_name", "renamed", "lakeflow_only"})
 PAIRED_STATUSES = frozenset({"same_name", "renamed"})
+
+#: ``--include-lakeflow-only`` choices. ``auto`` ingests Lakeflow-only tables only
+#: when the connector offers at most LAKEFLOW_ONLY_AUTO_LIMIT tables, so a short
+#: list like PagerDuty's comes over whole while HubSpot's does not add dozens of
+#: tables nobody asked for.
+LAKEFLOW_ONLY_AUTO = "auto"
+LAKEFLOW_ONLY_CHOICES = (LAKEFLOW_ONLY_AUTO, "all", "none")
+LAKEFLOW_ONLY_AUTO_LIMIT = 10
 
 # Long table lists are cut to this many names, then "and N more".
 _LIST_LIMIT = 10
@@ -67,17 +75,25 @@ def to_identifier(*parts: str) -> str:
     return re.sub(r"_{2,}", "_", cleaned) or "unnamed"
 
 
-def name_key(table: str) -> str:
+def name_keys(table: str) -> frozenset[str]:
     """Normalise a table name so Fivetran's and Lakeflow Connect's spellings meet.
 
-    Case and underscores are ignored, then a trailing ``ies`` becomes ``y`` and a
-    trailing ``s`` is dropped, so ``incident`` meets ``incidents``,
-    ``escalation_policy`` meets ``escalation_policies``, and ``on_call`` meets
-    ``oncalls``.
+    Case and underscores are ignored and a trailing ``ies`` becomes ``y``. Two
+    keys follow, and two names pair when any key is shared: one drops a trailing
+    ``s``, the other first drops ``es`` after ``ss``, ``us``, ``x``, ``z``, ``ch``
+    or ``sh``. ``-es`` is ambiguous, so neither key alone is enough: ``branches``
+    needs the second to meet ``branch``, while ``tranches`` needs the first to
+    meet ``tranche``. So ``incident`` meets ``incidents``, ``escalation_policy``
+    meets ``escalation_policies``, ``custom_status`` meets ``custom_statuses``,
+    ``cause`` meets ``causes``, and ``on_call`` meets ``oncalls``.
     """
-    key = table.lower().replace("_", "")
-    key = re.sub(r"ies$", "y", key)
-    return re.sub(r"s$", "", key)
+    key = re.sub(r"ies$", "y", table.lower().replace("_", ""))
+    return frozenset(
+        {
+            re.sub(r"s$", "", key),
+            re.sub(r"s$", "", re.sub(r"(ss|us|x|z|ch|sh)es$", r"\1", key)),
+        }
+    )
 
 
 def pair_tables(
@@ -88,7 +104,7 @@ def pair_tables(
     Without a supported-table list, every enabled Fivetran table is ``same_name``.
     With one, the plan starts from the Lakeflow Connect list, so a Fivetran name
     that differs can only add a table, never drop it. Each Lakeflow Connect table
-    pairs with the Fivetran table sharing its ``name_key``: ``same_name`` or
+    pairs with a Fivetran table sharing one of its ``name_keys``: ``same_name`` or
     ``renamed`` when that table is enabled, ``disabled_in_fivetran`` when the
     customer turned it off, ``lakeflow_only`` when nothing pairs. Enabled Fivetran
     tables left unpaired are ``not_available``.
@@ -102,12 +118,16 @@ def pair_tables(
 
     by_key: dict[str, list[dict[str, Any]]] = {}
     for table in tables:
-        by_key.setdefault(name_key(table.get("source_table") or ""), []).append(table)
+        for key in name_keys(table.get("source_table") or ""):
+            by_key.setdefault(key, []).append(table)
 
     rows: list[dict[str, Any]] = []
     chosen: set[int] = set()
     for lakeflow_table in sorted(t.lower() for t in supported):
-        match = _best_match(by_key.get(name_key(lakeflow_table), []), lakeflow_table)
+        candidates = {
+            id(t): t for key in name_keys(lakeflow_table) for t in by_key.get(key, [])
+        }
+        match = _best_match(list(candidates.values()), lakeflow_table)
         if match is None:
             status = "lakeflow_only"
         else:
@@ -141,6 +161,19 @@ def _best_match(candidates: list[dict[str, Any]], lakeflow_table: str) -> dict[s
     )
 
 
+def keep_lakeflow_only(target: Target, mode: str = LAKEFLOW_ONLY_AUTO) -> bool:
+    """Whether ``lakeflow_only`` tables of ``target`` are ingested under ``mode``."""
+    if mode == "all":
+        return True
+    if mode == "none" or target.supported_tables is None:
+        return False
+    return len(target.supported_tables) <= LAKEFLOW_ONLY_AUTO_LIMIT
+
+
+def _is_kept(row: dict[str, Any], keep_lakeflow: bool) -> bool:
+    return row["status"] in PAIRED_STATUSES or (row["status"] == "lakeflow_only" and keep_lakeflow)
+
+
 def _sample(names: list[str]) -> str:
     shown = ", ".join(names[:_LIST_LIMIT])
     more = len(names) - _LIST_LIMIT
@@ -159,6 +192,7 @@ def build_plan(
     existing_connections: dict[str, str] | None = None,
     lookup_connection: ConnectionLookup | None = None,
     sqlserver_arch: str = SQLSERVER_ARCH_INTEGRATED,
+    include_lakeflow_only: str = LAKEFLOW_ONLY_AUTO,
 ) -> dict[str, Any]:
     """Produce a migration plan from a discovery inventory.
 
@@ -167,8 +201,14 @@ def build_plan(
     ``lookup_connection``, when given, confirms each one exists with the right type.
     ``sqlserver_arch`` selects the SQL Server architecture: ``integrated`` (the
     default single-pipeline integrated CDC connector) or ``gateway`` (the older
-    gateway-based pair).
+    gateway-based pair). ``include_lakeflow_only`` decides whether Lakeflow Connect
+    tables no Fivetran table pairs with are ingested: ``auto``, ``all``, or ``none``.
     """
+    if include_lakeflow_only not in LAKEFLOW_ONLY_CHOICES:
+        raise ValueError(
+            f"include_lakeflow_only must be one of {', '.join(LAKEFLOW_ONLY_CHOICES)}, "
+            f"got '{include_lakeflow_only}'"
+        )
     if sqlserver_arch not in SQLSERVER_ARCH_CHOICES:
         raise ValueError(
             f"sqlserver_arch must be one of {', '.join(SQLSERVER_ARCH_CHOICES)}, "
@@ -189,13 +229,15 @@ def build_plan(
 
     reuse = _ReuseContext(existing, lookup_connection)
     items = [
-        _plan_connection(c, target_catalog, mar, reuse, sqlserver_arch) for c in connections
+        _plan_connection(c, target_catalog, mar, reuse, sqlserver_arch, include_lakeflow_only)
+        for c in connections
     ]
 
     return {
         "schema_version": PLAN_SCHEMA_VERSION,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "target_catalog": target_catalog,
+        "include_lakeflow_only": include_lakeflow_only,
         "source_account": inventory.get("account", {}),
         "items": items,
         "summary": summarise_plan(items),
@@ -268,6 +310,7 @@ def _plan_connection(
     mar: dict[str, Any] | None,
     reuse: _ReuseContext,
     sqlserver_arch: str = SQLSERVER_ARCH_INTEGRATED,
+    include_lakeflow_only: str = LAKEFLOW_ONLY_AUTO,
 ) -> dict[str, Any]:
     service = connection.get("service") or ""
     target = lookup(service)
@@ -282,8 +325,6 @@ def _plan_connection(
     reused_name = reuse.name_for(connection) if target.has_managed_connector else None
     verified, reuse_blocker = reuse.check(reused_name, target) if reused_name else (False, None)
 
-    tables = _plan_objects(connection, target, target_catalog)
-    objects = tables.objects
     schedule = _plan_schedule(connection)
     blockers, warnings = _assess(
         connection,
@@ -294,11 +335,19 @@ def _plan_connection(
         checked=reuse.can_check,
         use_integrated=use_integrated,
     )
+    tables = _plan_objects(
+        connection,
+        target,
+        target_catalog,
+        keep_lakeflow_only(target, include_lakeflow_only),
+        blocked=bool(blockers or reuse_blocker),
+    )
     if tables.blocker:
         blockers.append(tables.blocker)
-        objects = []
     if reuse_blocker:
         blockers.append(reuse_blocker)
+    if blockers:
+        tables.withdraw()
 
     return {
         "fivetran": {
@@ -331,7 +380,7 @@ def _plan_connection(
             "alternative": target.alternative,
             "has_supported_tables": target.supported_tables is not None,
         },
-        "objects": objects,
+        "objects": tables.objects,
         "table_counts": tables.counts,
         "table_plan": tables.plan,
         "schedule": schedule,
@@ -379,15 +428,30 @@ class _TablePlan:
     #: Every row with its status, for connectors with a supported-table list.
     plan: list[dict[str, Any]] | None = None
 
+    def withdraw(self) -> None:
+        """A blocked item ingests nothing. Statuses stay, since they explain the blocker."""
+        self.objects = []
+        for key in ("tables", "lakeflow_only", "lakeflow_skipped"):
+            if key in self.counts:
+                self.counts[key] = 0
+        for row in self.plan or []:
+            row["kept"] = False
+
 
 def _plan_objects(
-    connection: dict[str, Any], target: Target, target_catalog: str
+    connection: dict[str, Any],
+    target: Target,
+    target_catalog: str,
+    keep_lakeflow: bool,
+    blocked: bool = False,
 ) -> _TablePlan:
     """Translate the connection's tables into Lakeflow object specs.
 
     Tables are paired with the connector's supported-table list first (see
     ``pair_tables``), so ``source_table`` is always the Lakeflow Connect name.
     A connection where no table pairs is blocked: there is nothing to migrate.
+    ``blocked`` means another blocker will withdraw every table, so no warning
+    says Lakeflow-only tables are ingested.
     """
     result = _TablePlan()
     if not target.has_managed_connector:
@@ -410,7 +474,7 @@ def _plan_objects(
     keyless: list[str] = []
 
     for row in rows:
-        if row["status"] not in KEPT_STATUSES:
+        if not _is_kept(row, keep_lakeflow):
             continue
         table = row["fivetran"] or {}
         source_table = row["lakeflow_table"]
@@ -471,15 +535,16 @@ def _plan_objects(
             "source setup (for SQL Server, CDC instead of change tracking)."
         )
 
-    warnings.extend(_table_warnings(rows, tables, target))
-    result.counts = _table_counts(rows)
-    result.blocker = _table_blocker(result.counts, target)
+    warnings.extend(_table_warnings(rows, tables, target, keep_lakeflow, blocked))
+    result.blocker = _table_blocker(rows, target)
+    result.counts = _table_counts(rows, keep_lakeflow)
     if target.supported_tables is not None:
         result.plan = [
             {
                 "fivetran_table": (r["fivetran"] or {}).get("source_table"),
                 "lakeflow_table": r["lakeflow_table"],
                 "status": r["status"],
+                "kept": _is_kept(r, keep_lakeflow),
             }
             for r in rows
         ]
@@ -489,11 +554,10 @@ def _plan_objects(
             verified = dt.date.fromisoformat(target.last_verified)
             age = (dt.date.today() - verified).days
             if age > STALENESS_DAYS:
-                docs_suffix = f" {target.docs_url}" if target.docs_url else ""
                 warnings.append(
                     f"The {target.connection_type} supported-table list was last verified "
-                    f"on {target.last_verified} ({age} days ago). Check the connector "
-                    f"reference for newly added tables.{docs_suffix}"
+                    f"on {target.last_verified} ({age} days ago). Check "
+                    f"{target.docs_url or 'the connector reference'} for newly added tables."
                 )
         except ValueError:
             pass
@@ -513,22 +577,24 @@ def _plan_objects(
     return result
 
 
-def _table_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+def _table_counts(rows: list[dict[str, Any]], keep_lakeflow: bool) -> dict[str, int]:
     def count(*statuses: str) -> int:
         return sum(1 for r in rows if r["status"] in statuses)
 
+    lakeflow_only = count("lakeflow_only")
     return {
-        "tables": count(*KEPT_STATUSES),
+        "tables": sum(1 for r in rows if _is_kept(r, keep_lakeflow)),
         "paired": count(*PAIRED_STATUSES),
         "renamed": count("renamed"),
-        "lakeflow_only": count("lakeflow_only"),
+        "lakeflow_only": lakeflow_only if keep_lakeflow else 0,
+        "lakeflow_skipped": 0 if keep_lakeflow else lakeflow_only,
         "not_available": count("not_available"),
         "disabled_in_fivetran": count("disabled_in_fivetran"),
     }
 
 
-def _table_blocker(counts: dict[str, int], target: Target) -> str | None:
-    if counts["paired"]:
+def _table_blocker(rows: list[dict[str, Any]], target: Target) -> str | None:
+    if any(r["status"] in PAIRED_STATUSES for r in rows):
         return None
     if target.supported_tables is None:
         return (
@@ -537,14 +603,19 @@ def _table_blocker(counts: dict[str, int], target: Target) -> str | None:
         )
     return (
         f"None of the tables Fivetran syncs has an equivalent in {target.connection_type}, "
-        f"which offers {', '.join(sorted(target.supported_tables))}. Enable one in Fivetran "
-        "and re-run discovery, check Lakeflow Community Connectors (Beta) for one that covers "
+        f"which offers {_sample(sorted(target.supported_tables))}. Enable one in Fivetran "
+        "and re-run discovery, check Lakeflow Community Connectors for one that covers "
         "these tables, or keep this connection on Fivetran."
+        f"{_see(target, 'Supported tables:')}"
     )
 
 
 def _table_warnings(
-    rows: list[dict[str, Any]], tables: list[dict[str, Any]], target: Target
+    rows: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+    target: Target,
+    keep_lakeflow: bool,
+    blocked: bool = False,
 ) -> list[str]:
     connection_type = target.connection_type
     warnings: list[str] = []
@@ -563,11 +634,19 @@ def _table_warnings(
 
     paired = any(r["status"] in PAIRED_STATUSES for r in rows)
     lakeflow_only = sorted(r["lakeflow_table"] for r in rows if r["status"] == "lakeflow_only")
-    if paired and lakeflow_only:
+    if paired and lakeflow_only and keep_lakeflow:
+        if not blocked:
+            warnings.append(
+                f"{len(lakeflow_only)} {connection_type} table(s) match no table Fivetran "
+                f"lists and are ingested too: {_sample(lakeflow_only)}. Remove any you do "
+                "not need from the bundle."
+            )
+    elif paired and lakeflow_only and not blocked:
         warnings.append(
             f"{len(lakeflow_only)} {connection_type} table(s) match no table Fivetran lists "
-            f"and are ingested too: {_sample(lakeflow_only)}. Remove any you do not need "
-            "from the bundle."
+            f"and are not included: {_sample(lakeflow_only)}. To ingest them, add them to "
+            "this pipeline in the bundle, or re-run plan_migration.py with "
+            f"--include-lakeflow-only all, which applies to every connection.{_see(target)}"
         )
 
     not_available = sorted(
@@ -576,10 +655,9 @@ def _table_warnings(
         if r["status"] == "not_available"
     )
     if not_available:
-        docs_hint = f" See {target.docs_url}" if target.docs_url else ""
         warnings.append(
             f"{len(not_available)} Fivetran table(s) have no {connection_type} equivalent "
-            f"and are not migrated: {_sample(not_available)}.{docs_hint}"
+            f"and are not migrated: {_sample(not_available)}.{_see(target)}"
         )
 
     disabled = sorted(
@@ -688,6 +766,7 @@ def _assess(
     if not target.has_managed_connector:
         blockers.append(
             f"No managed Lakeflow Connect connector for '{service}'. {target.alternative}"
+            f"{_see(target)}"
         )
         return blockers, warnings
 
@@ -720,7 +799,8 @@ def _assess(
     elif target.availability is Availability.UNVERIFIED:
         warnings.append(
             f"Release state for {target.connection_type} was not verified. Confirm against "
-            "the current Lakeflow Connect connector list before committing to a date."
+            "the connector docs before committing to a date."
+            f"{_see(target)}"
         )
 
     if connection.get("networking_method") not in (None, "Directly"):
@@ -770,16 +850,15 @@ def _availability_warning(
         if verified:
             return None
         message = (
-            f"The {target.connection_type} connector is in Beta. A workspace admin turns Beta "
-            "connectors on from the workspace Previews page; confirm it is on in the "
-            "workspace you deploy to."
+            f"The {target.connection_type} connector is in Beta; confirm it is enabled in "
+            "the workspace you deploy to."
         )
         if unchecked_reuse:
             message += (
                 f" Reusing connection '{unchecked_reuse}' suggests it already is; pass "
                 "--databricks-profile to confirm and drop this note."
             )
-        return message
+        return message + _see(target)
     if target.availability is Availability.PUBLIC_PREVIEW:
         if verified:
             return None
@@ -787,8 +866,13 @@ def _availability_warning(
             f"The {target.connection_type} connector is in Public Preview. Some Public Preview "
             "connectors need enrollment through the Databricks account team; confirm access "
             "in the workspace you deploy to."
+            f"{_see(target)}"
         )
     return None
+
+
+def _see(target: Target, label: str = "See") -> str:
+    return f" {label} {target.docs_url}" if target.docs_url else ""
 
 
 def _mar_for(connection: dict[str, Any], mar: dict[str, Any] | None) -> int | None:
@@ -847,6 +931,7 @@ def summarise_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
         "tables_paired": total("paired", migratable),
         "tables_renamed": total("renamed", migratable),
         "tables_lakeflow_only": total("lakeflow_only", migratable),
+        "tables_lakeflow_skipped": total("lakeflow_skipped", migratable),
         "tables_not_available": total("not_available", items),
         "tables_scd2": sum(
             1

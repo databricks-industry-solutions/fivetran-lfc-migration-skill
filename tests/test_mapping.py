@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,7 +22,17 @@ from ftlfc.catalog import (
     Scriptable,
     lookup,
 )
-from ftlfc.mapping import CRON_BY_MINUTES, build_plan, name_key, to_identifier
+from ftlfc.mapping import (
+    CRON_BY_MINUTES,
+    LAKEFLOW_ONLY_AUTO_LIMIT,
+    build_plan,
+    keep_lakeflow_only,
+    name_keys,
+    pair_tables,
+    to_identifier,
+)
+
+SAMPLE_INVENTORY = SCRIPTS.parent / "fixtures/inventory.sample.json"
 
 
 class TestCatalog:
@@ -107,11 +118,14 @@ class TestCatalog:
 
     @pytest.mark.parametrize("target", [lookup("mongo"), UNKNOWN])
     def test_no_connector_alternatives_point_at_community_connectors(self, target) -> None:
-        assert "Lakeflow Community Connectors (Beta, open source" in target.alternative
+        assert "Lakeflow Community Connectors (open source" in target.alternative
         assert COMMUNITY_CONNECTORS_URL in target.alternative
 
-    def test_pagerduty_addresses_tables_under_the_default_schema(self) -> None:
-        assert lookup("pagerduty").fixed_source_schema == "default"
+    @pytest.mark.parametrize(
+        "service", ["pagerduty", "anaplan", "hubspot", "zendesk", "jira", "workday_hcm"]
+    )
+    def test_connectors_with_a_default_schema_rewrite_it(self, service) -> None:
+        assert lookup(service).fixed_source_schema == "default"
 
     def test_warehouses_route_to_federation(self) -> None:
         assert lookup("snowflake_db").category is Category.FEDERATION
@@ -278,7 +292,9 @@ class TestBuildPlan:
         item = plan["items"][0]
         notes = [w for w in item["warnings"] if "primary key" in w.lower()]
         assert len(notes) == 1
-        assert "2 table(s)" in notes[0] and "dbo.audit_log" in notes[0]
+        assert "2 table(s)" in notes[0]
+        assert "dbo.audit_log" in notes[0] and "dbo.events" in notes[0]
+        assert "dbo.Customers" not in notes[0]
         assert "CDC instead of change tracking" in notes[0]
         by_table = {o["source_table"]: o["table_configuration"] for o in item["objects"]}
         assert by_table["Customers"]["primary_keys"] == ["Id"]
@@ -462,14 +478,193 @@ _PD_UNPAIRED = (
 )
 
 
-def _pd_plan(*tables: dict) -> dict:
-    return build_plan(_inventory(_connection(service="pagerduty", objects=list(tables))), "main")
+def _pd_plan(*tables: dict, include_lakeflow_only: str = "auto") -> dict:
+    return build_plan(
+        _inventory(_connection(service="pagerduty", objects=list(tables))),
+        "main",
+        include_lakeflow_only=include_lakeflow_only,
+    )
+
+
+def _sample_plan(include_lakeflow_only: str = "auto") -> dict:
+    inventory = json.loads(SAMPLE_INVENTORY.read_text())
+    return build_plan(inventory, "main_prod", include_lakeflow_only=include_lakeflow_only)
+
+
+def _item_for(plan: dict, service: str) -> dict:
+    return next(i for i in plan["items"] if i["fivetran"]["service"] == service)
 
 
 def _statuses(item: dict) -> dict:
     return {
         (row["fivetran_table"], row["lakeflow_table"]): row["status"] for row in item["table_plan"]
     }
+
+
+class TestLakeflowOnlyCap:
+    """Lakeflow-only tables come over by default only for short connector lists."""
+
+    def test_auto_keeps_short_lists_and_skips_long_ones(self) -> None:
+        assert len(lookup("pagerduty").supported_tables) <= LAKEFLOW_ONLY_AUTO_LIMIT
+        assert keep_lakeflow_only(lookup("pagerduty"))
+        assert not keep_lakeflow_only(lookup("hubspot"))
+        assert not keep_lakeflow_only(lookup("workday_hcm"))
+        assert keep_lakeflow_only(lookup("hubspot"), "all")
+        assert not keep_lakeflow_only(lookup("pagerduty"), "none")
+
+    def test_pagerduty_keeps_priorities_by_default(self) -> None:
+        item = _pd_plan(*(_pd_table(t) for t in _PD_PAIRED))["items"][0]
+        assert "priorities" in {o["source_table"] for o in item["objects"]}
+        assert item["table_counts"]["tables"] == 10
+
+    def test_none_drops_pagerduty_priorities(self) -> None:
+        plan = _pd_plan(*(_pd_table(t) for t in _PD_PAIRED), include_lakeflow_only="none")
+        item = plan["items"][0]
+        assert "priorities" not in {o["source_table"] for o in item["objects"]}
+        assert item["table_counts"]["tables"] == 9
+        assert item["table_counts"]["lakeflow_skipped"] == 1
+        assert {r["lakeflow_table"]: r["kept"] for r in item["table_plan"]}["priorities"] is False
+        assert any(
+            "1 PAGERDUTY table(s) match no table Fivetran lists and are not included: "
+            "priorities. To ingest them, add them to this pipeline in the bundle, or re-run "
+            "plan_migration.py with --include-lakeflow-only all, which applies to every "
+            "connection." in w
+            for w in item["warnings"]
+        )
+
+    def test_hubspot_sample_skips_lakeflow_only_tables_by_default(self) -> None:
+        plan = _sample_plan()
+        item = _item_for(plan, "hubspot")
+        assert [o["source_table"] for o in item["objects"]] == ["deals"]
+        assert item["table_counts"]["lakeflow_only"] == 0
+        assert item["table_counts"]["lakeflow_skipped"] == 29
+        assert plan["summary"]["tables_lakeflow_skipped"] == 29
+        assert plan["include_lakeflow_only"] == "auto"
+        warning = next(w for w in item["warnings"] if "are not included" in w)
+        assert warning.startswith("29 HUBSPOT table(s) match no table Fivetran lists")
+        assert "and 19 more" in warning
+        assert warning.endswith(f"See {lookup('hubspot').docs_url}")
+
+    def test_all_restores_hubspot_lakeflow_only_tables(self) -> None:
+        plan = _sample_plan("all")
+        item = _item_for(plan, "hubspot")
+        assert len(item["objects"]) == 30
+        assert item["table_counts"]["lakeflow_only"] == 29
+        assert item["table_counts"]["lakeflow_skipped"] == 0
+        assert any("are ingested too" in w for w in item["warnings"])
+        assert not any("are not included" in w for w in item["warnings"])
+
+    def test_workday_hcm_skips_by_default(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="workday_hcm", objects=[_table(source_table="worker")])),
+            "main",
+        )
+        item = plan["items"][0]
+        assert item["table_counts"]["tables"] == 1
+        assert item["table_counts"]["lakeflow_skipped"] == 136
+
+    @pytest.mark.parametrize("mode", ["auto", "all", "none"])
+    def test_blocked_anaplan_reports_nothing_kept(self, mode: str) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="anaplan", objects=[_table(source_table="plans")])),
+            "main",
+            include_lakeflow_only=mode,
+        )
+        item = plan["items"][0]
+        assert item["blockers"][0].startswith("None of the tables Fivetran syncs")
+        assert item["objects"] == []
+        counts = item["table_counts"]
+        assert (counts["tables"], counts["lakeflow_only"], counts["lakeflow_skipped"]) == (0, 0, 0)
+        assert counts["not_available"] == 1
+        assert {(r["lakeflow_table"], r["status"], r["kept"]) for r in item["table_plan"]} == {
+            ("audit_events", "lakeflow_only", False),
+            ("users", "lakeflow_only", False),
+            (None, "not_available", False),
+        }
+        assert plan["summary"]["tables_total"] == 0
+        assert plan["summary"]["tables_lakeflow_only"] == 0
+        assert plan["summary"]["tables_not_available"] == 1
+
+    def test_blocked_unmapped_workday_reports_nothing_skipped(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(service="workday_hcm", objects=[_table(source_table="payroll_xyz")])
+            ),
+            "main",
+        )
+        item = plan["items"][0]
+        assert item["blockers"][0].startswith("None of the tables Fivetran syncs")
+        assert "and 127 more" in item["blockers"][0]
+        assert item["blockers"][0].endswith(lookup("workday_hcm").docs_url)
+        assert item["objects"] == []
+        assert item["table_counts"]["tables"] == 0
+        assert item["table_counts"]["lakeflow_skipped"] == 0
+        assert not any(r["kept"] for r in item["table_plan"])
+        assert plan["summary"]["tables_lakeflow_skipped"] == 0
+
+    def test_reuse_blocker_also_withdraws_tables(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "missing_conn"},
+            lookup_connection=lambda name: None,
+        )
+        item = plan["items"][0]
+        assert any("does not exist" in b for b in item["blockers"])
+        assert item["objects"] == []
+        assert item["table_counts"]["tables"] == 0
+        assert item["table_counts"]["paired"] == 1
+        assert not any(r["kept"] for r in item["table_plan"])
+        assert not any("are ingested too" in w for w in item["warnings"])
+
+    def test_wrong_type_reuse_does_not_claim_lakeflow_only_tables_are_ingested(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "sf_conn"},
+            lookup_connection=lambda name: {"connection_type": "SALESFORCE"},
+        )
+        item = plan["items"][0]
+        assert any("needs a PAGERDUTY connection" in b for b in item["blockers"])
+        assert not any("are ingested too" in w for w in item["warnings"])
+
+    def test_blocked_reuse_does_not_suggest_including_lakeflow_only_tables(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "missing_conn"},
+            lookup_connection=lambda name: None,
+            include_lakeflow_only="none",
+        )
+        item = plan["items"][0]
+        assert any("does not exist" in b for b in item["blockers"])
+        assert not any("are not included" in w for w in item["warnings"])
+
+    def test_verified_reuse_still_reports_lakeflow_only_tables_ingested(self) -> None:
+        plan = build_plan(
+            _inventory(_connection(service="pagerduty", objects=[_pd_table("incident")])),
+            "main",
+            existing_connections={"pagerduty": "pd_conn"},
+            lookup_connection=lambda name: {
+                "connection_type": "API_SOURCE",
+                "options": {"source_name": "pagerduty"},
+            },
+        )
+        item = plan["items"][0]
+        assert item["blockers"] == []
+        assert any("are ingested too" in w for w in item["warnings"])
+
+    def test_rejects_an_unknown_mode(self) -> None:
+        with pytest.raises(ValueError, match="include_lakeflow_only must be one of"):
+            build_plan(_inventory(_connection()), "main", include_lakeflow_only="some")
+
+    def test_cli_flag_reaches_the_plan(self, tmp_path: Path) -> None:
+        out = tmp_path / "plan.json"
+        args = ["-i", str(SAMPLE_INVENTORY), "-c", "main_prod", "-o", str(out)]
+        assert plan_migration.main([*args, "--include-lakeflow-only", "all"]) == 0
+        plan = json.loads(out.read_text())
+        assert plan["include_lakeflow_only"] == "all"
+        assert plan["summary"]["tables_lakeflow_skipped"] == 0
 
 
 class TestNameKey:
@@ -482,13 +677,81 @@ class TestNameKey:
             ("audit_record", "audit_records"),
             ("log_entries", "log_entries"),
             ("Users", "users"),
+            ("user", "users"),
+            ("priority", "priorities"),
+            ("branch", "branches"),
+            ("custom_status", "custom_statuses"),
+            ("deployment_status", "deployment_statuses"),
+            ("compensation_bonus_tranche", "compensation_bonus_tranches"),
+            ("compensation_bonus_tranches", "compensation_bonus_tranche"),
+            ("cause", "causes"),
+            ("cache", "caches"),
         ],
     )
     def test_fivetran_and_lakeflow_spellings_meet(self, fivetran: str, lakeflow: str) -> None:
-        assert name_key(fivetran) == name_key(lakeflow)
+        assert name_keys(fivetran) & name_keys(lakeflow)
 
     def test_distinct_tables_stay_distinct(self) -> None:
-        assert name_key("incident_log_entry") != name_key("log_entries")
+        assert not name_keys("incident_log_entry") & name_keys("log_entries")
+
+    @pytest.mark.parametrize(
+        "fivetran,lakeflow",
+        [
+            ("compensation_bonus_tranches", "compensation_bonus_tranche"),
+            ("compensation_bonus_tranche", "compensation_bonus_tranches"),
+            ("cause", "causes"),
+            ("cache", "caches"),
+            ("branch", "branches"),
+            ("custom_status", "custom_statuses"),
+            ("deployment_statuses", "deployment_status"),
+            ("incident", "incidents"),
+            ("escalation_policy", "escalation_policies"),
+            ("priority", "priorities"),
+        ],
+    )
+    def test_pair_tables_renames_either_plural_form(self, fivetran: str, lakeflow: str) -> None:
+        rows = pair_tables([_table(source_table=fivetran)], frozenset({lakeflow}))
+        pairs = [(r["lakeflow_table"], r["fivetran"]["source_table"], r["status"]) for r in rows]
+        assert pairs == [(lakeflow, fivetran, "renamed")]
+
+    def test_pair_tables_prefers_the_exact_name(self) -> None:
+        rows = pair_tables(
+            [_table(source_table="cause"), _table(source_table="causes")], frozenset({"causes"})
+        )
+        statuses = {((r["fivetran"] or {}).get("source_table"), r["status"]) for r in rows}
+        assert statuses == {("causes", "same_name"), ("cause", "not_available")}
+
+    @pytest.mark.parametrize(
+        "target",
+        [t for t in dict.fromkeys(CATALOG.values()) if t.supported_tables],
+        ids=lambda t: t.connection_type,
+    )
+    def test_no_two_catalog_tables_share_a_key(self, target) -> None:
+        keys: dict[str, list[str]] = {}
+        for table in target.supported_tables:
+            for key in name_keys(table):
+                keys.setdefault(key, []).append(table)
+        assert {k: v for k, v in keys.items() if len(v) > 1} == {}
+
+    def test_github_branch_pairs_with_branches(self) -> None:
+        plan = build_plan(
+            _inventory(
+                _connection(
+                    service="github",
+                    objects=[
+                        _table(source_table="branch"),
+                        _table(source_table="deployment_status"),
+                    ],
+                )
+            ),
+            "main",
+        )
+        item = plan["items"][0]
+        statuses = _statuses(item)
+        assert statuses[("branch", "branches")] == "renamed"
+        assert statuses[("deployment_status", "deployment_statuses")] == "renamed"
+        assert not any(s == "not_available" for s in statuses.values())
+        assert {"branches", "deployment_statuses"} <= {o["source_table"] for o in item["objects"]}
 
 
 class TestSupportedTablePairing:
@@ -504,6 +767,7 @@ class TestSupportedTablePairing:
             "paired": 9,
             "renamed": 7,
             "lakeflow_only": 1,
+            "lakeflow_skipped": 0,
             "not_available": len(_PD_UNPAIRED),
             "disabled_in_fivetran": 0,
         }
@@ -566,8 +830,9 @@ class TestSupportedTablePairing:
             (
                 f"None of the tables Fivetran syncs has an equivalent in PAGERDUTY, which offers "
                 f"{offered}. Enable one in Fivetran and re-run discovery, check Lakeflow "
-                "Community Connectors (Beta) for one that covers these tables, or keep this "
-                "connection on Fivetran."
+                "Community Connectors for one that covers these tables, or keep this "
+                "connection on Fivetran. Supported tables: "
+                f"{lookup('pagerduty').docs_url}"
             )
         ]
         assert item["objects"] == []
@@ -664,6 +929,27 @@ class TestCatalogSupportedTables:
         assert target.supported_tables is not None
         assert "pull_requests" in target.supported_tables
 
+    @pytest.mark.parametrize(
+        ("service", "count", "member"),
+        [
+            ("workday_hcm", 137, "worker_positions"),
+            ("google_ads", 24, "local_services_lead_conversation"),
+            ("hubspot", 30, "deals_pipelines"),
+            ("zendesk", 46, "audit_logs"),
+            ("jira", 28, "status_category"),
+            ("github", 23, "repo_contents"),
+            ("linkedin_ads", 12, "account_user_history"),
+            ("anaplan", 2, "audit_events"),
+            ("pagerduty", 10, "oncalls"),
+        ],
+    )
+    def test_supported_table_lists_match_the_docs(self, service, count, member) -> None:
+        target = lookup(service)
+        assert len(target.supported_tables) == count
+        assert member in target.supported_tables
+        assert target.docs_url.startswith("https://docs.databricks.com/")
+        assert target.last_verified
+
     def test_database_connectors_have_no_supported_tables(self) -> None:
         for service in ("sql_server", "postgres", "mysql", "oracle"):
             target = lookup(service)
@@ -675,19 +961,10 @@ class TestCatalogSupportedTables:
         target = lookup("salesforce")
         assert target.supported_tables is None
 
-    def test_all_managed_connectors_have_docs_url_or_notes(self) -> None:
+    def test_all_managed_connectors_link_their_docs(self) -> None:
         for service, target in CATALOG.items():
             if target.has_managed_connector:
-                has_context = (
-                    target.docs_url
-                    or target.notes
-                    or target.source_prerequisites
-                    or target.auth_note
-                )
-                assert has_context, (
-                    f"{service} ({target.connection_type}) has no docs_url, notes, "
-                    "auth_note, or source_prerequisites"
-                )
+                assert target.docs_url.startswith("https://docs.databricks.com/"), service
 
 
 def _pagerduty(connection_id: str = "pd1") -> dict:
@@ -703,10 +980,10 @@ def _availability_warnings(item: dict) -> list[str]:
 
 
 class TestAvailabilityWording:
-    def test_beta_points_at_the_workspace_previews_page_not_the_account_team(self) -> None:
+    def test_beta_links_the_connector_docs_not_the_account_team(self) -> None:
         item = build_plan(_inventory(_pagerduty()), "main")["items"][0]
         (warning,) = _availability_warnings(item)
-        assert "Previews page" in warning
+        assert warning.endswith(f"See {lookup('pagerduty').docs_url}")
         assert "account team" not in warning
         assert "confirm" in warning
 
@@ -716,6 +993,15 @@ class TestAvailabilityWording:
         ][0]
         (warning,) = _availability_warnings(item)
         assert "account team" in warning
+        assert "postgresql-reference" in warning
+
+    def test_no_managed_connector_blocker_links_the_alternative(self) -> None:
+        item = build_plan(_inventory(_connection(service="s3", objects=[_table()])), "main")[
+            "items"
+        ][0]
+        (blocker,) = item["blockers"]
+        assert blocker.endswith(f"See {lookup('s3').docs_url}")
+        assert "auto-loader" in blocker
 
 
 class TestConnectionReuse:

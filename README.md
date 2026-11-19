@@ -372,14 +372,16 @@ Lakeflow Connect table list (PagerDuty, HubSpot, Zendesk, and others), it pairs
 each Lakeflow Connect table with the Fivetran table of the same name, ignoring
 case, underscores, and plural endings (Fivetran `incident` pairs with
 `incidents`), and reports renamed tables, Lakeflow-only tables, and Fivetran
-tables with no equivalent.
+tables with no equivalent. Lakeflow-only tables are ingested by default only
+when the connector offers 10 or fewer tables; for longer lists (HubSpot,
+Workday HCM) they are listed as not included. `--include-lakeflow-only all`
+adds them, and `none` drops them everywhere.
 
 ### Stage 4: Consumption
 
 Prints the recorded Fivetran consumption and spend for Gate 1. If the customer
 agrees, writes a CSV export for their Databricks account team:
-`connections.csv` (one row per connection with the Lakeflow Connect cost
-estimator inputs: `source_type`, `num_rows` per run, `num_flows`, `cloud`,
+`connections.csv` (one row per connection with `source_type`, `num_rows` per run, `num_flows`, `cloud`,
 `region`), `fivetran_billing.csv`, `mar_by_table.csv`, and a `README.txt`. The
 skill never prices Lakeflow Connect, compares costs, or states a saving.
 
@@ -560,7 +562,7 @@ a pipeline and job.
 
 **The skill records cost; it does not estimate it.** It captures Fivetran MAR,
 billed amounts, and any spend the customer shares, exactly as given, and exports
-them in the input shape of the Lakeflow Connect cost estimator. The Databricks
+them with each connection's source type, table count, and volume. The Databricks
 account team runs any cost modelling outside the skill. The export is written
 only after the customer agrees to it.
 

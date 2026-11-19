@@ -141,7 +141,7 @@ class TestConsumptionRows:
         assert len(rows) == len(plan["items"])
         assert all(r["cloud"] == "aws" and r["region"] == "us-west-2" for r in rows)
 
-    def test_estimator_inputs_from_latest_full_month(self, plan: dict, mar_doc: dict) -> None:
+    def test_connection_volume_from_latest_full_month(self, plan: dict, mar_doc: dict) -> None:
         sfdc = _by_id(consumption_rows(plan, mar_doc, today=TODAY))["speak_inexpensive"]
         assert sfdc["source_type"] == "SALESFORCE"
         assert sfdc["num_flows"] == 2

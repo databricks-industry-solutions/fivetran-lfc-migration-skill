@@ -20,6 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ftlfc.mapping import (
+    LAKEFLOW_ONLY_AUTO,
+    LAKEFLOW_ONLY_AUTO_LIMIT,
+    LAKEFLOW_ONLY_CHOICES,
     SQLSERVER_ARCH_CHOICES,
     SQLSERVER_ARCH_INTEGRATED,
     build_plan,
@@ -59,6 +62,16 @@ def main(argv: list[str] | None = None) -> int:
             "SQL Server architecture: 'integrated' (default) generates a single "
             "integrated CDC pipeline with no gateway; 'gateway' generates the "
             "gateway-based pair on classic compute"
+        ),
+    )
+    parser.add_argument(
+        "--include-lakeflow-only",
+        choices=LAKEFLOW_ONLY_CHOICES,
+        default=LAKEFLOW_ONLY_AUTO,
+        help=(
+            "Lakeflow Connect tables no Fivetran table pairs with: 'auto' (default) "
+            f"ingests them only when the connector offers {LAKEFLOW_ONLY_AUTO_LIMIT} or fewer "
+            "tables; 'all' always; 'none' never"
         ),
     )
     parser.add_argument("-o", "--output", default="out/plan.json")
@@ -104,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             existing_connections=existing,
             lookup_connection=lookup,
             sqlserver_arch=args.sqlserver_arch,
+            include_lakeflow_only=args.include_lakeflow_only,
         )
     except (ValueError, WorkspaceError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -160,6 +174,12 @@ def _report(plan: dict, destination: Path) -> None:
             f"    {summary['tables_paired']} paired with a Fivetran table "
             f"({summary['tables_renamed']} renamed), {summary['tables_lakeflow_only']} "
             "Lakeflow Connect only"
+        )
+    skipped = summary.get("tables_lakeflow_skipped", 0)
+    if skipped:
+        print(
+            f"  {skipped} Lakeflow Connect-only table(s) not included "
+            "(--include-lakeflow-only all adds them)"
         )
     if summary.get("tables_not_available"):
         print(
