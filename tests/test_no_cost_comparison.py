@@ -37,6 +37,26 @@ COST_COMPARISON = [
     r"\$\s?[\d,.]+\s*(/|per)\s*(month|mo|year|yr)\b.*\b(lakeflow|databricks)\b",
 ]
 
+DATABRICKS_PRICING_SOURCES = [
+    r"system\.billing\.",
+    r"\blist[_ ]prices?\b",
+    r"\bDBUs?\b",
+    r"\$\s?/\s?DBU\b",
+    r"\brate[_ ]card\b",
+    r"\bcost model\b",
+    r"\bstage 2\.5\b",
+]
+
+REMOVED_COST_MODULES = [
+    "scripts/compare_cost.py",
+    "scripts/databricks_telemetry.py",
+    "scripts/build_update_cost_table.py",
+    "scripts/ftlfc/costs.py",
+    "scripts/ftlfc/system_tables.py",
+    "scripts/ftlfc/update_costs.py",
+    "references/bundles-and-cost.md",
+]
+
 
 def _offenders(text: str) -> list[str]:
     return [p for p in COST_COMPARISON if re.search(p, text, re.IGNORECASE)]
@@ -116,6 +136,40 @@ def test_docs_and_scripts_never_point_to_a_cost_estimator() -> None:
         if re.search(r"\bcost estimators?\b", p.read_text(), re.IGNORECASE)
     ]
     assert found == []
+
+
+def test_docs_and_scripts_never_read_databricks_pricing() -> None:
+    paths = [REPO / "README.md", *SKILL.rglob("*.md"), *SKILL.rglob("*.py")]
+    found = {
+        str(p.relative_to(REPO)): hits
+        for p in paths
+        if (
+            hits := [
+                pat
+                for pat in DATABRICKS_PRICING_SOURCES
+                if re.search(pat, p.read_text(), re.IGNORECASE)
+            ]
+        )
+    }
+    assert found == {}
+
+
+@pytest.mark.parametrize("relative", REMOVED_COST_MODULES)
+def test_cost_model_modules_stay_removed(relative: str) -> None:
+    assert not (SKILL / relative).exists()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Queries system.billing.list_prices for the customer's DBU rates.",
+        "Ground the cost model with Databricks telemetry.",
+        "## Stage 2.5: Telemetry",
+        "Serverless jobs run at $0.35/DBU.",
+    ],
+)
+def test_the_pricing_check_catches_rate_lookups(line: str) -> None:
+    assert any(re.search(p, line, re.IGNORECASE) for p in DATABRICKS_PRICING_SOURCES)
 
 
 def test_recorded_spend_is_reported_as_given(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
