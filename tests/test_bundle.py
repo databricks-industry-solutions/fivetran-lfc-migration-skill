@@ -396,6 +396,12 @@ class TestBlockedConnections:
     def test_readme_does_not_list_manual_connections_when_there_are_none(self) -> None:
         assert "Manual connections" not in build_bundle(_plan(_item()), "acme")["README.md"]
 
+    def test_readme_validates_prod_only_right_before_the_prod_deploy(self) -> None:
+        lines = build_bundle(_plan(_item()), "acme")["README.md"].splitlines()
+        prod_validate = lines.index("databricks bundle validate --strict -t prod")
+        assert lines[prod_validate + 1] == "databricks bundle deploy -t prod"
+        assert prod_validate > lines.index("databricks bundle deploy -t dev")
+
     def test_mixed_plan_emits_only_the_migratable_pipelines(self) -> None:
         plan = _plan(_item(key="good"), _item(key="bad", blockers=["nope"]))
         files = build_bundle(plan, "acme")

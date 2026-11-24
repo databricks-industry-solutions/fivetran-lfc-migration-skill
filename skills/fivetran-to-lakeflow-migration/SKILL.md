@@ -565,8 +565,11 @@ Then the customer cuts over in this order (do not compress it):
 1. Deploy to `dev` and let one full sync complete.
 2. **Reconcile** row counts and spot-check values against the Fivetran-managed
    tables. This is the customer's responsibility.
-3. Deploy to `prod` and run both pipelines in parallel for at least one full
-   business cycle.
+3. Once the customer confirms the prod deploy, run
+   `databricks bundle validate --strict -t prod`, then deploy to `prod` and run
+   both pipelines in parallel for at least one full business cycle. Validate
+   only `dev` before that point, including when the user asked for bundle files
+   without a deploy.
 4. **Customer action:** Pause the Fivetran connection. Do not delete it.
    The skill has no Fivetran write APIs and cannot do this automatically.
 5. Delete only after the customer confirms reconciliation over a period they

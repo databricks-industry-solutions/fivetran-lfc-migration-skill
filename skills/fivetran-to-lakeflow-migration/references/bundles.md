@@ -408,7 +408,7 @@ databricks bundle init lakeflow-pipelines
 
 # Validate. ALWAYS use --strict: it promotes warnings to errors.
 databricks bundle validate --strict --profile DEFAULT
-databricks bundle validate --strict -t prod --profile prod
+databricks bundle validate --strict -t prod --profile prod   # only right before a confirmed prod deploy
 databricks bundle validate --strict --debug            # when an error message is opaque
 
 # Deploy
