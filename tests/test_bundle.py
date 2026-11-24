@@ -608,6 +608,12 @@ class TestCatalogCheck:
             "cli_catalog_lookup",
             lambda profile: lambda name: checked.append((profile, name)) or {"name": name},
         )
+        monkeypatch.setattr(generate_bundle, "cli_pipeline_search", lambda profile: lambda f: [])
+        monkeypatch.setattr(generate_bundle, "cli_pipeline_lookup", lambda profile: lambda i: None)
+        monkeypatch.setattr(generate_bundle, "cli_current_user", lambda profile: "me@example.com")
+        monkeypatch.setattr(
+            generate_bundle, "cli_workspace_path_lookup", lambda profile: lambda p: None
+        )
         plan_path = tmp_path / "plan.json"
         plan_path.write_text(json.dumps(_plan(_item())))
         code = generate_bundle.main(

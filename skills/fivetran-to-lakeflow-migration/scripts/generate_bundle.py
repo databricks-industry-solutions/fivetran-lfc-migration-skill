@@ -19,8 +19,110 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ftlfc.bundle import build_bundle, dev_catalog_for
-from ftlfc.workspace import WorkspaceError, cli_catalog_lookup
+from ftlfc.bundle import (
+    build_bundle,
+    dev_catalog_for,
+    is_pipeline_name_for,
+    migratable_keys,
+    rename_pipeline_keys,
+)
+from ftlfc.workspace import (
+    WorkspaceError,
+    cli_catalog_lookup,
+    cli_current_user,
+    cli_pipeline_lookup,
+    cli_pipeline_search,
+    cli_workspace_path_lookup,
+)
+
+
+def existing_bundle_files(output: Path) -> list[str]:
+    """The databricks.yml and resource files already in ``output``, relative."""
+    if not output.is_dir():
+        return []
+    found = [output / "databricks.yml"] if (output / "databricks.yml").is_file() else []
+    resources = output / "resources"
+    if resources.is_dir():
+        found += sorted(p for p in resources.rglob("*") if p.suffix in (".yml", ".yaml"))
+    return [p.relative_to(output).as_posix() for p in found]
+
+
+def find_name_clashes(
+    keys: list[str],
+    bundle_name: str,
+    search: Callable[[str], list[dict]],
+    get: Callable[[str], dict | None],
+) -> dict[str, str]:
+    """Map each key whose pipeline name another bundle or person already uses to a
+    suffixed key nobody uses. A pipeline deployed from a bundle of this name is
+    this bundle's own and not a clash."""
+    own_state = f"/.bundle/{bundle_name}/"
+
+    def clashes(key: str) -> bool:
+        for pipeline in search(f"lfc-{key}-"):
+            if not is_pipeline_name_for(pipeline.get("name", ""), key):
+                continue
+            spec = (get(pipeline["pipeline_id"]) or {}).get("spec") or {}
+            if own_state not in (spec.get("deployment") or {}).get("metadata_file_path", ""):
+                return True
+        return False
+
+    taken = set(keys)
+    renames: dict[str, str] = {}
+    for key in keys:
+        candidate, n = key, 1
+        while clashes(candidate):
+            n += 1
+            candidate = f"{key}_{n}"
+            while candidate in taken:
+                n += 1
+                candidate = f"{key}_{n}"
+        if candidate != key:
+            taken.add(candidate)
+            renames[key] = candidate
+    return renames
+
+
+def check_bundle_state(bundle_name: str, profile: str) -> None:
+    """Warn when the profile's user already deployed a bundle with this name:
+    bundles with the same name share deployment state, so a deploy replaces that
+    bundle's resources with this one's."""
+    try:
+        user = cli_current_user(profile)
+        path = f"/Workspace/Users/{user}/.bundle/{bundle_name}"
+        exists = cli_workspace_path_lookup(profile)(path) is not None
+    except WorkspaceError as exc:
+        print(f"  warning: could not check for an existing bundle state: {exc}", file=sys.stderr)
+        return
+    if exists:
+        print(
+            f"  warning: {path} exists, so a bundle named '{bundle_name}' was already "
+            "deployed. Deploying this one replaces that bundle's resources; if it is a "
+            "different bundle, pass a different --name.",
+            file=sys.stderr,
+        )
+
+
+def check_pipeline_names(plan: dict, bundle_name: str, profile: str) -> dict[str, str]:
+    """Suffix keys whose pipeline names are already taken; warns and renames
+    nothing when the workspace cannot be queried."""
+    try:
+        renames = find_name_clashes(
+            migratable_keys(plan),
+            bundle_name,
+            cli_pipeline_search(profile),
+            cli_pipeline_lookup(profile),
+        )
+    except WorkspaceError as exc:
+        print(f"  warning: could not check pipeline names: {exc}", file=sys.stderr)
+        return {}
+    for old, new in renames.items():
+        print(
+            f"  note: a pipeline named like 'lfc-{old}-<target>' already exists outside this "
+            f"bundle; using key '{new}' instead",
+            file=sys.stderr,
+        )
+    return renames
 
 
 def check_catalogs(
@@ -64,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--force", action="store_true", help="overwrite an existing output directory"
     )
+    parser.add_argument(
+        "--keep-existing-resources",
+        action="store_true",
+        help="with --force, keep resource files already in the output directory that this "
+        "plan does not generate; they deploy with the bundle",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -78,28 +186,56 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     plan = json.loads(args.plan.read_text())
+    existing = existing_bundle_files(args.output)
     if args.output.exists() and any(args.output.iterdir()) and not args.force:
+        print(f"error: {args.output} is not empty.", file=sys.stderr)
+        if existing:
+            print(f"  It already holds a bundle: {', '.join(existing)}", file=sys.stderr)
         print(
-            f"error: {args.output} is not empty. Pass --force to overwrite.",
+            "  Write to a new -o folder, or pass --force to overwrite this one.",
             file=sys.stderr,
         )
         return 1
 
     dev_catalog = dev_catalog_for(plan, args.dev_catalog)
     catalog_exists: dict[str, bool | None] = {}
+    renamed_keys: dict[str, str] = {}
     if args.databricks_profile:
         catalog_exists = check_catalogs(
             [dev_catalog, plan["target_catalog"]], cli_catalog_lookup(args.databricks_profile)
         )
+        renamed_keys = check_pipeline_names(plan, args.name, args.databricks_profile)
+        plan = rename_pipeline_keys(plan, renamed_keys)
+        check_bundle_state(args.name, args.databricks_profile)
 
-    files = build_bundle(
-        plan,
-        bundle_name=args.name,
-        host=args.host,
-        notification_email=args.email,
-        dev_catalog=dev_catalog,
-        catalog_exists=catalog_exists,
-    )
+    def build(kept: list[str]) -> dict[str, str]:
+        return build_bundle(
+            plan,
+            bundle_name=args.name,
+            host=args.host,
+            notification_email=args.email,
+            dev_catalog=dev_catalog,
+            catalog_exists=catalog_exists,
+            renamed_keys=renamed_keys,
+            kept_resources=kept,
+        )
+
+    files = build([])
+    leftover = [p for p in existing if p != "databricks.yml" and p not in files]
+    if leftover and not args.keep_existing_resources:
+        print(
+            f"error: {args.output} holds resource files this plan does not generate, and "
+            f"`include: resources/*.yml` would deploy them: {', '.join(leftover)}",
+            file=sys.stderr,
+        )
+        print(
+            "  Write to a new -o folder (and --name), or pass --keep-existing-resources "
+            "to deploy them with this bundle.",
+            file=sys.stderr,
+        )
+        return 1
+    if leftover:
+        files = build(leftover)
 
     for relative, contents in sorted(files.items()):
         path = args.output / relative

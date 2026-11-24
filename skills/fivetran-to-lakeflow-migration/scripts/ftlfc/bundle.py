@@ -22,7 +22,9 @@ Three structural facts from the API research shape what gets generated:
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 from typing import Any
 
 import yaml
@@ -62,6 +64,26 @@ def dev_catalog_for(plan: dict[str, Any], dev_catalog: str | None = None) -> str
     return dev_catalog or f"{plan['target_catalog']}_dev"
 
 
+def migratable_keys(plan: dict[str, Any]) -> list[str]:
+    return [i["target"]["pipeline_name"] for i in plan["items"] if not i["blockers"]]
+
+
+def is_pipeline_name_for(name: str, key: str) -> bool:
+    """True when ``name`` is a deployed name this bundle would give ``key``'s
+    pipeline or gateway, in any target, with or without the dev-mode prefix."""
+    pattern = rf"(?:\[dev [^\]]+\] )?lfc-{re.escape(key)}-(?:gateway-)?[^-]+"
+    return re.fullmatch(pattern, name) is not None
+
+
+def rename_pipeline_keys(plan: dict[str, Any], renames: dict[str, str]) -> dict[str, Any]:
+    """Return a copy of ``plan`` with each renamed key's pipeline_name replaced."""
+    renamed = copy.deepcopy(plan)
+    for item in renamed["items"]:
+        key = item["target"]["pipeline_name"]
+        item["target"]["pipeline_name"] = renames.get(key, key)
+    return renamed
+
+
 def build_bundle(
     plan: dict[str, Any],
     bundle_name: str,
@@ -69,11 +91,16 @@ def build_bundle(
     notification_email: str | None = None,
     dev_catalog: str | None = None,
     catalog_exists: dict[str, bool | None] | None = None,
+    renamed_keys: dict[str, str] | None = None,
+    kept_resources: list[str] | None = None,
 ) -> dict[str, str]:
     """Render a complete bundle as a mapping of relative path -> file contents.
 
     ``catalog_exists`` maps a catalog name to True or False when the workspace was
     checked, or None when the check could not run; it only feeds the README.
+    ``renamed_keys`` (original key -> unique key, already applied to ``plan``) and
+    ``kept_resources`` (resource files already in the output folder that will
+    deploy with this bundle) are reported in the README.
     """
     migratable = [i for i in plan["items"] if not i["blockers"]]
     dev_catalog = dev_catalog_for(plan, dev_catalog)
@@ -102,6 +129,8 @@ def build_bundle(
         has_placeholders=any(
             "REPLACE_ME" in line for line in script.splitlines() if not line.startswith("#")
         ),
+        renamed_keys=renamed_keys or {},
+        kept_resources=kept_resources or [],
     )
     return files
 
@@ -497,6 +526,8 @@ def _bundle_readme(
     dev_catalog: str,
     catalog_exists: dict[str, bool | None],
     has_placeholders: bool,
+    renamed_keys: dict[str, str],
+    kept_resources: list[str],
 ) -> str:
     summary = plan["summary"]
     prod_catalog = plan["target_catalog"]
@@ -568,6 +599,22 @@ def _bundle_readme(
         lines.append(
             "- Gateways run continuously on classic compute and are billed even when the "
             "ingestion pipeline is idle."
+        )
+
+    if kept_resources:
+        lines.append(
+            "- This folder already held the resource files below, and they deploy with this "
+            "bundle: "
+            + ", ".join(f"`{path}`" for path in kept_resources)
+            + ". Remove any the migration did not choose before deploying."
+        )
+
+    if renamed_keys:
+        lines.append(
+            "- Another bundle already deploys pipelines under these names, so these keys were "
+            "given a suffix: "
+            + ", ".join(f"`{old}` -> `{new}`" for old, new in renamed_keys.items())
+            + ". Do not bind the existing pipelines or run them in place of this bundle's."
         )
 
     if summary.get("integrated_cdc_pipelines"):

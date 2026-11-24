@@ -428,9 +428,6 @@ databricks bundle summary -t prod --profile prod
 # Tear down everything the bundle created in that target. Destructive.
 databricks bundle destroy -t dev --profile DEFAULT
 
-# Adopt a pipeline that already exists in the workspace (see warning below)
-databricks bundle deployment bind mi_pipeline <existing-pipeline-id> -t prod --profile prod
-
 # Reverse-engineer YAML from an existing pipeline
 databricks bundle generate pipeline <pipeline-id> --profile DEFAULT
 ```
@@ -446,7 +443,11 @@ This action will result in the deletion or recreation of the following DLT Pipel
 along with the Streaming Tables (STs) and Materialized Views (MVs) managed by them.
 ```
 
-Do not `--auto-approve` a plan containing "recreate pipeline". For pipelines created by hand and later moved into a bundle, use `bundle deployment bind` so the bundle adopts the existing ID instead of creating a duplicate.
+Do not `--auto-approve` a plan containing "recreate pipeline".
+
+### Name clashes
+
+A pipeline name already used in the workspace fails `bundle deploy` with `409 RESOURCE_CONFLICT` ("already used by another pipeline"). This skill never runs `bundle deployment bind` to adopt that pipeline and never sets `allow_duplicate_names`: the pipeline belongs to another bundle or to a person, and adopting it would let this bundle change or delete it. Give this bundle's pipeline a unique name instead; `generate_bundle.py --databricks-profile` does this by suffixing the key. To see who owns a pipeline, `databricks pipelines get <id>` shows `spec.deployment.metadata_file_path` (`.../.bundle/<bundle name>/<target>/state/metadata.json`) for bundle-deployed pipelines.
 
 ## 1.7 Per-environment parameterization
 

@@ -155,6 +155,10 @@ Present the generated bundle for review before any deployment:
    in `create_connections.sh`), which source systems need admin setup.
 5. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
    equivalents.
+6. **Bundle folder and names** — the output folder and bundle name, any
+   resource files that were already in the folder and will deploy with the
+   bundle (`--keep-existing-resources`), and any pipeline keys the generator
+   suffixed because another bundle already uses the name.
 
 **Wait here.** The customer may want to:
 - Adjust destination schemas or table names
@@ -527,6 +531,26 @@ The bundle never creates catalogs. The `prod` target sets `workspace.root_path`
 to the deploying user's `.bundle` folder, which `mode: production` requires; for
 a team-owned deployment switch it to `/Workspace/Shared/...` and add a `run_as`
 service principal (see `references/bundles.md`).
+
+Write each migration to a new, empty `-o` folder with its own `--name`. Bundles
+with the same name share deployment state, so a deploy replaces the other
+bundle's resources; with `--databricks-profile` the generator warns when your
+`.bundle/<name>` folder already exists. A non-empty folder is refused, and the
+error lists the bundle files it holds. `--force` still refuses when the folder
+holds resource files this plan does not generate, since `include:
+resources/*.yml` would deploy them; show them to the customer and use a new
+folder unless they choose `--keep-existing-resources`. Deploy only the
+connections approved at Gate 1, plus resources the customer chose to keep.
+
+With `--databricks-profile`, the generator also lists pipelines named like each
+`lfc-<key>-` (`databricks pipelines list-pipelines --filter`) and reads each
+match's `spec.deployment.metadata_file_path` (`databricks pipelines get`). A
+pipeline that this bundle did not deploy is a clash: the key gets a suffix
+(`<key>_2`), and the bundle README lists the rename. Never run `databricks
+bundle deployment bind`, set `allow_duplicate_names`, or run another bundle's
+pipeline in place of this one. If a deploy still fails because a pipeline name
+is already used, regenerate with `--databricks-profile` and present Gate 2
+again.
 
 Produces a bundle the customer keeps in their own repo: one ingestion pipeline
 per connection, a gateway pipeline where gateway-based CDC needs one, and a

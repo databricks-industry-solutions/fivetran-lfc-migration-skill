@@ -396,6 +396,13 @@ under the deploying user's `.bundle` folder (`workspace.root_path`, required by
 `mode: production`). The bundle README lists renamed and Lakeflow Connect-only
 tables.
 
+Write each migration to a new `-o` folder with its own `--name`. The generator
+refuses a folder that already holds resource files the plan does not generate,
+even with `--force`, unless `--keep-existing-resources` is passed. With
+`--databricks-profile` it also gives a pipeline key a suffix when another
+bundle already deploys a pipeline under that name, and warns when a bundle with
+the same name was already deployed. It never binds existing pipelines.
+
 ### Stage 6: Deploy
 
 Validates and deploys the bundle. Includes a five-step cutover protocol with
@@ -417,7 +424,8 @@ export, and writes it only after a yes.
 
 The agent presents: bundle contents, excluded connections, manual steps
 (browser-OAuth connections listed under "Manual connections" in the bundle
-README), and schedule mapping. The customer may adjust schemas,
+README), schedule mapping, and the bundle folder: resource files that were
+already there and pipeline keys renamed to avoid a name clash. The customer may adjust schemas,
 frequencies, or table scope.
 
 Neither gate can be skipped. Do not proceed until the customer explicitly
