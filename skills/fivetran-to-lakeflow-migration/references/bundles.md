@@ -49,7 +49,7 @@ variables:
 targets:
   dev:
     default: true
-    mode: development           # prefixes resource names, pauses schedules, sets development=true
+    mode: development           # prefixes resource names, pauses schedules (unless a job sets pause_status), sets development=true
     workspace:
       host: https://my-dev-workspace.cloud.databricks.com
       # 'profile:' is an alternative to 'host:' — do not set both

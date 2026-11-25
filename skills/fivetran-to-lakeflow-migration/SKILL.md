@@ -626,6 +626,10 @@ again only when the customer asks. Report success only for tables you saw land
 in the target schema. After a failed update, list the tables it left behind.
 Commands and details: "Runs" in `references/bundles.md`.
 
+Generated jobs never set `pause_status`: `mode: development` pauses every dev
+schedule and trigger, so a dev sync happens only through an approved `bundle
+run`, and prod jobs start `UNPAUSED` once the customer confirms the prod deploy.
+
 Then the customer cuts over in this order (do not compress it):
 
 1. Deploy to `dev` and let one full sync complete.

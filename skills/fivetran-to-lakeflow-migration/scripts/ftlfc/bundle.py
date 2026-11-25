@@ -344,13 +344,14 @@ def _job(item: dict[str, Any], notification_email: str | None) -> dict[str, Any]
         ],
     }
 
+    # No pause_status: development mode pauses schedules only when it is unset,
+    # and jobs default to UNPAUSED in production.
     if schedule["mode"] == "continuous":
-        job["continuous"] = {"pause_status": "UNPAUSED"}
+        job["continuous"] = {}
     else:
         job["schedule"] = {
             "quartz_cron_expression": schedule["quartz_cron_expression"],
             "timezone_id": schedule.get("timezone_id", "UTC"),
-            "pause_status": "UNPAUSED",
         }
 
     if notification_email:
@@ -579,7 +580,8 @@ def _bundle_readme(
         "# 2. Validate. --strict promotes warnings to errors.",
         "databricks bundle validate --strict -t dev",
         "",
-        "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules.",
+        "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules;",
+        "#    run a dev sync with `databricks bundle run <key> -t dev`.",
         "databricks bundle deploy -t dev",
         "",
         "# 4. Check what landed. Validate prod only once you've decided to promote,",

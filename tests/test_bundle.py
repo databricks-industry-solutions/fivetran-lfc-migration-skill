@@ -325,8 +325,17 @@ class TestJob:
         item = _item(schedule={"mode": "continuous", "max_concurrent_runs": 1})
         files = build_bundle(_plan(item), "acme")
         job = _load(files, "resources/sales_abc.job.yml")["resources"]["jobs"]["sales_abc_schedule"]
-        assert job["continuous"] == {"pause_status": "UNPAUSED"}
+        assert job["continuous"] == {}
         assert "schedule" not in job
+
+    def test_jobs_leave_pause_status_to_the_deployment_mode(self) -> None:
+        for schedule in (None, {"mode": "continuous", "max_concurrent_runs": 1}):
+            item = _item(schedule=schedule) if schedule else _item()
+            files = build_bundle(_plan(item), "acme")
+            assert "pause_status" not in files["resources/sales_abc.job.yml"]
+            root = _load(files, "databricks.yml")
+            assert "presets" not in root["targets"]["dev"]
+            assert "presets" not in root["targets"]["prod"]
 
     def test_notifications_are_wired_when_an_email_is_given(self) -> None:
         files = build_bundle(_plan(_item()), "acme", notification_email="a@b.com")

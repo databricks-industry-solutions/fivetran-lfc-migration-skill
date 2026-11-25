@@ -411,6 +411,8 @@ already exist and are owned by another pipeline, with that pipeline's bundle.
 ### Stage 6: Deploy
 
 Validates and deploys the bundle to `dev`; running it is a separate approval.
+Generated jobs leave `pause_status` unset, so development mode pauses dev
+schedules and prod schedules run after a confirmed prod deploy.
 Before a re-run the agent checks the pipeline's updates and the job's runs,
 reports a failed update's leftover tables, and reports success only for tables
 it saw land. Includes a five-step cutover protocol with parallel-run validation
