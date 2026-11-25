@@ -440,7 +440,9 @@ tables another pipeline owns. The customer may adjust schemas, frequencies, or
 table scope, and approves a deploy to `dev` without a run.
 
 Neither gate can be skipped. Do not proceed until the customer explicitly
-approves.
+approves. A request to deploy before Gate 1 still gets the Gate 1 summary and
+export question first. If a write is blocked or fails, the agent says what did
+not change and asks how to proceed.
 
 ---
 

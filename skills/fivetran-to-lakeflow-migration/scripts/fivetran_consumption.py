@@ -142,7 +142,16 @@ def _review_spend(args: argparse.Namespace) -> int:
     if not args.clear:
         print("Ask the customer whether to keep or clear these before Gate 1.")
         return 0
-    save_spend(args.spend, [e for e in entries if e not in earlier])
+    try:
+        save_spend(args.spend, [e for e in entries if e not in earlier])
+    except OSError as exc:
+        print(
+            f"error: nothing was cleared; {len(earlier)} earlier entr"
+            f"{'y' if len(earlier) == 1 else 'ies'} remain in {args.spend} ({exc}). "
+            "Tell the customer and ask how to proceed.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"Cleared {len(earlier)} earlier spend entr{'y' if len(earlier) == 1 else 'ies'}.")
     return 0
 

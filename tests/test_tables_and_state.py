@@ -164,11 +164,17 @@ class TestEarlierSpend:
 
     def _entries(self) -> list[dict]:
         old = record_spend(
-            [], month="2026-10", monthly_usd=6850, basis="invoice",
+            [],
+            month="2026-10",
+            monthly_usd=6850,
+            basis="invoice",
             now=dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc),
         )
         return record_spend(
-            old, month="2026-11", monthly_usd=7000, basis="estimate",
+            old,
+            month="2026-11",
+            monthly_usd=7000,
+            basis="estimate",
             now=dt.datetime(2026, 11, 25, 15, 0, tzinfo=dt.timezone.utc),
         )
 
@@ -207,6 +213,24 @@ class TestEarlierSpend:
         assert code == 0
         assert [e["period_month"] for e in load_spend(path)] == ["2026-11-01"]
 
+    def test_failed_clear_says_nothing_was_cleared(self, tmp_path, monkeypatch, capsys) -> None:
+        path = tmp_path / "fivetran_spend.json"
+        save_spend(path, self._entries())
+        before = path.read_text()
+
+        def blocked(*args, **kwargs):
+            raise PermissionError("read-only file system")
+
+        monkeypatch.setattr(fivetran_consumption, "save_spend", blocked)
+        code = fivetran_consumption.main(
+            ["review-spend", "--spend", str(path), "--since", self.START.isoformat(), "--clear"]
+        )
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "nothing was cleared" in err and "1 earlier entry remain" in err
+        assert "ask how to proceed" in err
+        assert path.read_text() == before
+
     def test_no_earlier_spend(self, tmp_path, capsys) -> None:
         code = fivetran_consumption.main(["review-spend", "--spend", str(tmp_path / "none.json")])
         assert code == 0
@@ -226,8 +250,16 @@ class TestEarlierSpend:
         plan_path = tmp_path / "plan.json"
         plan_path.write_text(json.dumps(_plan(_item())))
         code = generate_bundle.main(
-            ["-p", str(plan_path), "-o", str(tmp_path / "b"), "--name", "acme",
-             "--databricks-profile", "staging"]
+            [
+                "-p",
+                str(plan_path),
+                "-o",
+                str(tmp_path / "b"),
+                "--name",
+                "acme",
+                "--databricks-profile",
+                "staging",
+            ]
         )
         assert code == 0
         readme = (tmp_path / "b/README.md").read_text()

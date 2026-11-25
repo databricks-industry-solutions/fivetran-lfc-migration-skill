@@ -93,7 +93,12 @@ history keeps it.
 
 There are two mandatory gates. At each one the agent **must stop, present the
 summary, and wait for an explicit "proceed"** from the human. Never skip a gate,
-even if there are no blockers.
+even if there are no blockers. If the customer asks to deploy or build a bundle
+before Gate 1, say Gate 1 comes first, finish stages 1–4, present the Gate 1
+summary and the export question, and get the Gate 1 answer before generating
+any bundle file. Ask each approval (Gate 1, Gate 2, the deploy, each run) as a
+question the customer answers (`askUserQuestions` in Genie Code), not as a
+suggested follow-up.
 
 ### Gate 1 — Assessment review (after stages 1–4)
 
@@ -164,8 +169,11 @@ Present the generated bundle for review before any deployment:
    (listed under "Table conflicts" in the bundle README). A streaming table has
    one owning pipeline, so the first update fails on each one.
 
-Ask for approval to **deploy to dev (no run)**. Running is a separate approval
-after the deploy (stage 6).
+Show all of the above in the message right before the approval question, and
+summarize the dev `bundle validate` result, the name and table checks, the UC
+connections needed, and the cutover plan in the question itself. Ask for
+approval to **deploy to dev (no run)**. Running is a separate approval after the
+deploy (stage 6).
 
 **Wait here.** The customer may want to:
 - Adjust destination schemas or table names
@@ -216,6 +224,15 @@ could not be confirmed, and each managed connector carries a `docs_url` (the
 Databricks page that lists its supported tables) that the plan's warnings and
 blockers link. Before committing to a date with a customer, check that page
 and the workspace's own Previews page.
+
+**Report blocked or failed writes.** If a write is blocked (Auto Mode, missing
+permission) or fails, say so plainly, name each change that did not happen
+(for example "the October spend entry was not cleared"), and ask how to
+proceed. Never continue, or report, as if it happened. `review-spend --clear`
+exits 1 and says nothing was cleared when it cannot write the file.
+
+**Use only verified CLI flags.** Use the `databricks` flags this skill gives,
+or ones `databricks <command> --help` lists; check `--help` before any other.
 
 ## Stage 1: Discover (Assessment)
 
@@ -374,7 +391,9 @@ python3 ${SCRIPTS}/fivetran_consumption.py review-spend \
 ```
 
 Pass `--spend` at Gate 1 only for spend given or kept in this session; if the
-customer skipped spend, show none.
+customer skipped spend, show none. If `--clear` fails, the entries are still in
+the file: tell the customer, and either label them at Gate 1 as recorded in an
+earlier session or leave `--spend` off, as they choose.
 
 ## Stage 3: Map (Conversion)
 

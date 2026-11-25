@@ -472,6 +472,7 @@ A table whose owner is not one of this bundle's pipelines is a conflict; `genera
   ```
 
   State a cause for an update only from this evidence (for example `cause` and whether the job has a run at that time); otherwise say the cause is unknown. A cancelled or interrupted `bundle run` can still leave its update running.
+- **Latest events.** `databricks pipelines list-pipeline-events <pipeline_id> --limit 20 -o json` returns the newest first; add `--filter "level='ERROR'"` for errors only. There is no `--order-by` flag, and `--max-results` sets the page size, not the total.
 - **No polling.** After one `RUNNING` status, report it and stop. Check again only when the customer asks.
 - **After a failed update**, list tables in every schema the failed config targeted whose `pipeline_id` is this bundle's pipeline (`databricks tables list`), and report them as left behind. Never say nothing was left without that check. If the destination schema changes afterwards, tell the customer the tables under the old schema remain and need manual cleanup; drop them only with explicit approval.
 - **Before reporting success**, confirm the tables landed (`SHOW TABLES IN <catalog>.<schema>` and a `count(*)` per table) and report only the tables you verified.

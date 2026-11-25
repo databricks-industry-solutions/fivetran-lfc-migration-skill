@@ -59,6 +59,7 @@ def find_name_clashes(
     """Map each key whose pipeline name another bundle or person already uses to a
     suffixed key nobody uses. A pipeline deployed from a bundle of this name is
     this bundle's own and not a clash."""
+
     def clashes(key: str) -> bool:
         return any(
             is_pipeline_name_for(pipeline.get("name", ""), key)
