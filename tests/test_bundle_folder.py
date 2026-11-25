@@ -19,7 +19,9 @@ from ftlfc.bundle import build_bundle, is_pipeline_name_for, rename_pipeline_key
 from ftlfc.workspace import WorkspaceError, cli_pipeline_search, cli_workspace_path_lookup
 from test_bundle import _item, _plan
 
-OTHER_BUNDLE = "/Workspace/Users/me@example.com/.bundle/fivetran_migration_test/dev/state/metadata.json"
+OTHER_BUNDLE = (
+    "/Workspace/Users/me@example.com/.bundle/fivetran_migration_test/dev/state/metadata.json"
+)
 OWN_BUNDLE = "/Workspace/Users/me@example.com/.bundle/acme/dev/state/metadata.json"
 
 
@@ -168,6 +170,7 @@ class TestExistingFolder:
         monkeypatch.setattr(generate_bundle, "cli_pipeline_lookup", lambda p: get)
         monkeypatch.setattr(generate_bundle, "cli_current_user", lambda p: "me@example.com")
         monkeypatch.setattr(generate_bundle, "cli_workspace_path_lookup", lambda p: lambda x: None)
+        monkeypatch.setattr(generate_bundle, "cli_table_list", lambda p: lambda c, s: [])
         folder = tmp_path / "bundle"
         code = generate_bundle.main(
             [
@@ -215,7 +218,8 @@ class TestCliCommands:
 
         def run(command, **kwargs):
             calls.append(command)
-            return subprocess.CompletedProcess(command, 0, '[{"pipeline_id": "p", "name": "x"}]', "")
+            listing = '[{"pipeline_id": "p", "name": "x"}]'
+            return subprocess.CompletedProcess(command, 0, listing, "")
 
         assert cli_pipeline_search("staging", runner=run)("lfc-pd-") == [
             {"pipeline_id": "p", "name": "x"}

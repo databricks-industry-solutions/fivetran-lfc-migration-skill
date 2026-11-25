@@ -137,6 +137,30 @@ def load_spend(path: Path | None) -> list[dict[str, Any]]:
     return entries
 
 
+def spend_recorded_before(
+    entries: list[dict[str, Any]], since: dt.datetime | None
+) -> list[dict[str, Any]]:
+    """Entries recorded before ``since`` (an earlier session), or all when None.
+
+    An entry with no readable ``recorded_at`` counts as earlier.
+    """
+    if since is None:
+        return list(entries)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=dt.timezone.utc)
+
+    def earlier(entry: dict[str, Any]) -> bool:
+        try:
+            recorded = dt.datetime.fromisoformat(entry.get("recorded_at") or "")
+        except ValueError:
+            return True
+        if recorded.tzinfo is None:
+            recorded = recorded.replace(tzinfo=dt.timezone.utc)
+        return recorded < since
+
+    return [e for e in entries if earlier(e)]
+
+
 def save_spend(path: Path, entries: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"fivetran_spend": entries}, indent=2) + "\n")

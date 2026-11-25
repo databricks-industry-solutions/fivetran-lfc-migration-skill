@@ -41,6 +41,9 @@ PROD_ROOT_PATH = (
     "/Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}"
 )
 
+DEV_SCHEMA_SUFFIX = "_dev"
+_SCHEMA_SUFFIX_VAR = "${var.schema_suffix}"
+
 _MANUAL_CONNECTION_NOTE = (
     "MANUAL. This connector uses browser-based OAuth only, so no script can create its "
     "connection. Create it once in Catalog Explorer (Catalog > External data > "
@@ -93,6 +96,7 @@ def build_bundle(
     catalog_exists: dict[str, bool | None] | None = None,
     renamed_keys: dict[str, str] | None = None,
     kept_resources: list[str] | None = None,
+    table_conflicts: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
     """Render a complete bundle as a mapping of relative path -> file contents.
 
@@ -100,7 +104,9 @@ def build_bundle(
     checked, or None when the check could not run; it only feeds the README.
     ``renamed_keys`` (original key -> unique key, already applied to ``plan``) and
     ``kept_resources`` (resource files already in the output folder that will
-    deploy with this bundle) are reported in the README.
+    deploy with this bundle) are reported in the README, as are
+    ``table_conflicts``: destination tables that already exist and belong to
+    something other than this bundle (keys ``target``, ``table``, ``owner``).
     """
     migratable = [i for i in plan["items"] if not i["blockers"]]
     dev_catalog = dev_catalog_for(plan, dev_catalog)
@@ -131,6 +137,7 @@ def build_bundle(
         ),
         renamed_keys=renamed_keys or {},
         kept_resources=kept_resources or [],
+        table_conflicts=table_conflicts or [],
     )
     return files
 
@@ -140,7 +147,9 @@ def _root(
 ) -> dict[str, Any]:
     catalog = plan["target_catalog"]
 
-    def target(mode: str, dest_catalog: str, **extra: Any) -> dict[str, Any]:
+    def target(
+        mode: str, dest_catalog: str, schema_suffix: str | None = None, **extra: Any
+    ) -> dict[str, Any]:
         # Built fresh per target: sharing one dict makes PyYAML emit an anchor
         # and an alias, which is valid but confusing in a file humans review.
         spec: dict[str, Any] = {"mode": mode, **extra}
@@ -152,6 +161,8 @@ def _root(
         if workspace:
             spec["workspace"] = workspace
         spec["variables"] = {"dest_catalog": dest_catalog}
+        if schema_suffix:
+            spec["variables"]["schema_suffix"] = schema_suffix
         return spec
 
     return {
@@ -170,11 +181,17 @@ def _root(
                 "description": "Schema holding gateway and integrated CDC staging volumes",
                 "default": "ingestion_staging",
             },
+            "schema_suffix": {
+                "description": "Appended to every destination schema; dev sets _dev",
+                "default": "",
+            },
         },
         "targets": {
-            # Development mode prefixes resource names and pauses schedules, so
-            # a dev deploy cannot compete with production for the same source.
-            "dev": target("development", dev_catalog, default=True),
+            # Development mode prefixes resource names, and its own schemas keep a
+            # dev run from writing into tables prod or another pipeline owns.
+            "dev": target(
+                "development", dev_catalog, default=True, schema_suffix=DEV_SCHEMA_SUFFIX
+            ),
             "prod": target("production", catalog),
         },
     }
@@ -190,7 +207,7 @@ def _pipeline(item: dict[str, Any], notification_email: str | None) -> dict[str,
         "serverless": True,
         "channel": "CURRENT",
         "catalog": "${var.dest_catalog}",
-        "schema": target["destination_schema"],
+        "schema": target["destination_schema"] + _SCHEMA_SUFFIX_VAR,
         "ingestion_definition": _ingestion_definition(item, needs_gateway, key),
     }
 
@@ -284,7 +301,7 @@ def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
             "source_url": obj.get("source_url")
             or f"REPLACE_WITH_RAAS_URL_FOR_{obj['source_table']}",
             "destination_catalog": "${var.dest_catalog}",
-            "destination_schema": obj["destination_schema"],
+            "destination_schema": obj["destination_schema"] + _SCHEMA_SUFFIX_VAR,
             "destination_table": obj["destination_table"],
         }
     else:
@@ -292,7 +309,7 @@ def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
             "source_schema": obj["source_schema"],
             "source_table": obj["source_table"],
             "destination_catalog": "${var.dest_catalog}",
-            "destination_schema": obj["destination_schema"],
+            "destination_schema": obj["destination_schema"] + _SCHEMA_SUFFIX_VAR,
             "destination_table": obj["destination_table"],
         }
         # source_catalog is the source database name. Required for integrated
@@ -528,6 +545,7 @@ def _bundle_readme(
     has_placeholders: bool,
     renamed_keys: dict[str, str],
     kept_resources: list[str],
+    table_conflicts: list[dict[str, str]],
 ) -> str:
     summary = plan["summary"]
     prod_catalog = plan["target_catalog"]
@@ -564,7 +582,8 @@ def _bundle_readme(
         "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules.",
         "databricks bundle deploy -t dev",
         "",
-        "# 4. Check what landed. Validate prod only once you've decided to promote, then deploy it.",
+        "# 4. Check what landed. Validate prod only once you've decided to promote,",
+        "#    then deploy it.",
         "databricks bundle summary -t dev",
         "databricks bundle validate --strict -t prod",
         "databricks bundle deploy -t prod",
@@ -592,6 +611,10 @@ def _bundle_readme(
         (
             "- A pipeline fails if a destination table already exists, so deploy into a clean "
             "schema or set `destination_table` explicitly."
+        ),
+        (
+            f"- The dev target writes to `<schema>{DEV_SCHEMA_SUFFIX}` (`schema_suffix`), so a "
+            "dev run never writes into the schemas prod uses."
         ),
     ]
 
@@ -624,6 +647,24 @@ def _bundle_readme(
             "through the `${var.staging_catalog}.${var.staging_schema}` volume the pipeline "
             "creates. They run in triggered mode on their companion job."
         )
+
+    if table_conflicts:
+        lines += [
+            "",
+            "## Table conflicts",
+            "",
+            (
+                "These destination tables already exist and belong to something other than this "
+                "bundle. A table belongs to one pipeline at a time, so the update fails on them. "
+                "Pick another schema; do not move them to this bundle's pipeline or drop them "
+                "without the owner's approval."
+            ),
+            "",
+            "| Target | Table | Owner |",
+            "|---|---|---|",
+        ]
+        for c in table_conflicts:
+            lines.append(f"| {c['target']} | `{c['table']}` | {c['owner']} |")
 
     if manual:
         lines += [

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import stat
 import sys
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ftlfc.bundle import (
+    DEV_SCHEMA_SUFFIX,
     build_bundle,
     dev_catalog_for,
     is_pipeline_name_for,
@@ -32,6 +34,7 @@ from ftlfc.workspace import (
     cli_current_user,
     cli_pipeline_lookup,
     cli_pipeline_search,
+    cli_table_list,
     cli_workspace_path_lookup,
 )
 
@@ -56,16 +59,12 @@ def find_name_clashes(
     """Map each key whose pipeline name another bundle or person already uses to a
     suffixed key nobody uses. A pipeline deployed from a bundle of this name is
     this bundle's own and not a clash."""
-    own_state = f"/.bundle/{bundle_name}/"
-
     def clashes(key: str) -> bool:
-        for pipeline in search(f"lfc-{key}-"):
-            if not is_pipeline_name_for(pipeline.get("name", ""), key):
-                continue
-            spec = (get(pipeline["pipeline_id"]) or {}).get("spec") or {}
-            if own_state not in (spec.get("deployment") or {}).get("metadata_file_path", ""):
-                return True
-        return False
+        return any(
+            is_pipeline_name_for(pipeline.get("name", ""), key)
+            and _owner_bundle(get(pipeline["pipeline_id"])) != bundle_name
+            for pipeline in search(f"lfc-{key}-")
+        )
 
     taken = set(keys)
     renames: dict[str, str] = {}
@@ -81,6 +80,74 @@ def find_name_clashes(
             taken.add(candidate)
             renames[key] = candidate
     return renames
+
+
+def _owner_bundle(pipeline: dict | None) -> str | None:
+    """The bundle a pipeline was deployed from, from its deployment metadata path."""
+    spec = (pipeline or {}).get("spec") or {}
+    path = (spec.get("deployment") or {}).get("metadata_file_path", "")
+    match = re.search(r"/\.bundle/([^/]+)/", path)
+    return match.group(1) if match else None
+
+
+def find_table_conflicts(
+    plan: dict,
+    dev_catalog: str,
+    bundle_name: str,
+    list_tables: Callable[[str, str], list[dict]],
+    get: Callable[[str], dict | None],
+) -> list[dict[str, str]]:
+    """Destination tables that already exist, per target, and do not belong to a
+    pipeline deployed from this bundle."""
+    targets = [
+        ("dev", dev_catalog, DEV_SCHEMA_SUFFIX),
+        ("prod", plan["target_catalog"], ""),
+    ]
+    listed: dict[tuple[str, str], dict[str, dict]] = {}
+    conflicts: list[dict[str, str]] = []
+    for item in plan["items"]:
+        if item["blockers"]:
+            continue
+        for target, catalog, suffix in targets:
+            for obj in item["objects"]:
+                schema = f"{obj['destination_schema']}{suffix}"
+                if (catalog, schema) not in listed:
+                    listed[(catalog, schema)] = {t["name"]: t for t in list_tables(catalog, schema)}
+                table = listed[(catalog, schema)].get(obj["destination_table"])
+                if table is None:
+                    continue
+                owner_id = table.get("pipeline_id")
+                pipeline = get(owner_id) if owner_id else None
+                bundle = _owner_bundle(pipeline)
+                if bundle == bundle_name:
+                    continue
+                if owner_id:
+                    name = (pipeline or {}).get("name", "name unknown")
+                    owner = f"pipeline `{owner_id}` ({name})"
+                    owner += f", bundle `{bundle}`" if bundle else ", not from a bundle"
+                else:
+                    owner = f"{table.get('table_type', 'table')} not owned by a pipeline"
+                full_name = f"{catalog}.{schema}.{obj['destination_table']}"
+                conflicts.append({"target": target, "table": full_name, "owner": owner})
+    return conflicts
+
+
+def check_tables(plan: dict, dev_catalog: str, bundle_name: str, profile: str) -> list[dict]:
+    """Warn about destination tables something else owns; never fails."""
+    try:
+        conflicts = find_table_conflicts(
+            plan, dev_catalog, bundle_name, cli_table_list(profile), cli_pipeline_lookup(profile)
+        )
+    except WorkspaceError as exc:
+        print(f"  warning: could not check destination tables: {exc}", file=sys.stderr)
+        return []
+    for c in conflicts:
+        print(
+            f"  warning: {c['table']} ({c['target']}) already exists, owned by {c['owner']}; "
+            "see 'Table conflicts' in README.md",
+            file=sys.stderr,
+        )
+    return conflicts
 
 
 def check_bundle_state(bundle_name: str, profile: str) -> None:
@@ -200,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     dev_catalog = dev_catalog_for(plan, args.dev_catalog)
     catalog_exists: dict[str, bool | None] = {}
     renamed_keys: dict[str, str] = {}
+    table_conflicts: list[dict[str, str]] = []
     if args.databricks_profile:
         catalog_exists = check_catalogs(
             [dev_catalog, plan["target_catalog"]], cli_catalog_lookup(args.databricks_profile)
@@ -207,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         renamed_keys = check_pipeline_names(plan, args.name, args.databricks_profile)
         plan = rename_pipeline_keys(plan, renamed_keys)
         check_bundle_state(args.name, args.databricks_profile)
+        table_conflicts = check_tables(plan, dev_catalog, args.name, args.databricks_profile)
 
     def build(kept: list[str]) -> dict[str, str]:
         return build_bundle(
@@ -218,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
             catalog_exists=catalog_exists,
             renamed_keys=renamed_keys,
             kept_resources=kept,
+            table_conflicts=table_conflicts,
         )
 
     files = build([])

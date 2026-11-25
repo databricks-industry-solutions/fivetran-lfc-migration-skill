@@ -159,6 +159,13 @@ Present the generated bundle for review before any deployment:
    resource files that were already in the folder and will deploy with the
    bundle (`--keep-existing-resources`), and any pipeline keys the generator
    suffixed because another bundle already uses the name.
+7. **Table conflicts** — destination tables that already exist and are not
+   owned by this bundle's pipelines, with the owning pipeline and bundle
+   (listed under "Table conflicts" in the bundle README). A streaming table has
+   one owning pipeline, so the first update fails on each one.
+
+Ask for approval to **deploy to dev (no run)**. Running is a separate approval
+after the deploy (stage 6).
 
 **Wait here.** The customer may want to:
 - Adjust destination schemas or table names
@@ -354,7 +361,20 @@ python3 ${SCRIPTS}/fivetran_consumption.py spend --month 2026-09 \
   --note "Enterprise plan, renews 2027-03" -o ${FTLFC_OUT}/fivetran_spend.json
 ```
 
-Recording the same month again replaces the earlier entry.
+Recording the same month again replaces the earlier entry. When
+`fivetran_spend.json` already exists, list what an earlier session recorded
+before asking, then ask whether to keep or clear it:
+
+```bash
+python3 ${SCRIPTS}/fivetran_consumption.py review-spend \
+  --spend ${FTLFC_OUT}/fivetran_spend.json --since <session start, ISO 8601>
+# only if the customer says clear:
+python3 ${SCRIPTS}/fivetran_consumption.py review-spend \
+  --spend ${FTLFC_OUT}/fivetran_spend.json --since <session start> --clear
+```
+
+Pass `--spend` at Gate 1 only for spend given or kept in this session; if the
+customer skipped spend, show none.
 
 ## Stage 3: Map (Conversion)
 
@@ -391,7 +411,9 @@ source-side setup.
 
 **Reusing existing connections.** Before running this stage, ask whether any
 Unity Catalog connection already exists for a source being migrated. If one
-does, pass it rather than hand-editing names in the generated bundle:
+does, pass it rather than hand-editing names in the generated bundle. Pass
+`--use-connection` only for connections the customer names in this session,
+never from an earlier session's notes or plan:
 
 ```bash
 python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json -c <dest_catalog> \
@@ -552,6 +574,17 @@ pipeline in place of this one. If a deploy still fails because a pipeline name
 is already used, regenerate with `--databricks-profile` and present Gate 2
 again.
 
+The `dev` target writes to its own schemas: the bundle sets a `schema_suffix`
+variable (empty by default, `_dev` in `dev`), so a dev pipeline for
+`pagerduty` writes to `pagerduty_dev` and never to the prod schema. With
+`--databricks-profile`, the generator also lists the tables in each dev and
+prod destination schema (`databricks tables list <catalog> <schema>
+--omit-columns`), reads the owner of each streaming table from its
+`pipeline_id` (`databricks pipelines get`), and lists every table this bundle
+does not own under "Table conflicts" in the README. Show them at Gate 2. Never
+drop a table, or change the pipeline that owns it, without the customer's
+explicit approval.
+
 Produces a bundle the customer keeps in their own repo: one ingestion pipeline
 per connection, a gateway pipeline where gateway-based CDC needs one, and a
 companion job per pipeline. SQL Server integrated CDC connections generate a
@@ -583,6 +616,15 @@ cd ${FTLFC_OUT}/bundle
 databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
 ```
+
+Deploying and running are separate approvals: after the deploy, ask before
+`databricks bundle run`, and run only resource keys this bundle defines. If a
+deploy or run fails, stop and show the error. Before a re-run, check the
+pipeline's latest updates and the job's runs; give a cause for an update only
+from that evidence. Check a running update once, report it, and stop; check
+again only when the customer asks. Report success only for tables you saw land
+in the target schema. After a failed update, list the tables it left behind.
+Commands and details: "Runs" in `references/bundles.md`.
 
 Then the customer cuts over in this order (do not compress it):
 

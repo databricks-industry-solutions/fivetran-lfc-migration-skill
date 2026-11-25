@@ -102,6 +102,27 @@ def cli_pipeline_search(
     return search
 
 
+def cli_table_list(
+    profile: str, runner: Runner = subprocess.run
+) -> Callable[[str, str], list[dict[str, Any]]]:
+    """Return a listing of the tables in ``catalog.schema``; empty when the schema
+    does not exist."""
+
+    def list_tables(catalog: str, schema: str) -> list[dict[str, Any]]:
+        what = f"tables in '{catalog}.{schema}'"
+        proc = _run_cli(
+            ["tables", "list", catalog, schema, "--omit-columns"], profile, runner, what
+        )
+        if proc.returncode == 0:
+            return json.loads(proc.stdout or "[]") or []
+        stderr = (proc.stderr or "").strip()
+        if any(marker in stderr for marker in _NOT_FOUND_MARKERS):
+            return []
+        raise WorkspaceError(f"could not list {what}: {stderr[:300]}")
+
+    return list_tables
+
+
 def cli_current_user(profile: str, runner: Runner = subprocess.run) -> str:
     """Return the userName of the profile's identity."""
     proc = _run_cli(["current-user", "me"], profile, runner, "the current user")

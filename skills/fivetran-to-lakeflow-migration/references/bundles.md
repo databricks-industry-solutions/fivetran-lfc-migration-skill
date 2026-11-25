@@ -449,6 +449,33 @@ Do not `--auto-approve` a plan containing "recreate pipeline".
 
 A pipeline name already used in the workspace fails `bundle deploy` with `409 RESOURCE_CONFLICT` ("already used by another pipeline"). This skill never runs `bundle deployment bind` to adopt that pipeline and never sets `allow_duplicate_names`: the pipeline belongs to another bundle or to a person, and adopting it would let this bundle change or delete it. Give this bundle's pipeline a unique name instead; `generate_bundle.py --databricks-profile` does this by suffixing the key. To see who owns a pipeline, `databricks pipelines get <id>` shows `spec.deployment.metadata_file_path` (`.../.bundle/<bundle name>/<target>/state/metadata.json`) for bundle-deployed pipelines.
 
+### Table ownership
+
+A streaming table belongs to the one pipeline that created it. An update that targets a table another pipeline owns fails for that table, and other tables in the same update can still land. Check each destination schema before Gate 2:
+
+```bash
+databricks tables list <catalog> <schema> --omit-columns -o json --profile <p>   # pipeline_id per table
+databricks pipelines get <pipeline_id> -o json --profile <p>   # name, spec.deployment.metadata_file_path
+```
+
+A table whose owner is not one of this bundle's pipelines is a conflict; `generate_bundle.py --databricks-profile` lists them under "Table conflicts" in the README. The generated bundle writes `dev` to `<schema>${var.schema_suffix}` (`_dev` in `dev`, empty in `prod`) so a dev deploy does not land in the prod schema. Resolve a conflict by choosing another schema or table name, or by having the customer retire the other pipeline. Never drop a table or change its owning pipeline without explicit approval.
+
+### Runs
+
+- **Deploy and run are separate approvals.** After `bundle deploy` succeeds, ask before `bundle run`, and run only keys this bundle defines (`databricks bundle summary` lists them). If the deploy or run fails, stop and show the error.
+- **Before a re-run**, check what is already running and why:
+
+  ```bash
+  databricks pipelines get <pipeline_id> -o json --profile <p>             # latest_updates: state, cause, creation_time
+  databricks pipelines list-updates <pipeline_id> --max-results 5 -o json --profile <p>
+  databricks jobs list-runs --job-id <job_id> --limit 5 -o json --profile <p>
+  ```
+
+  State a cause for an update only from this evidence (for example `cause` and whether the job has a run at that time); otherwise say the cause is unknown. A cancelled or interrupted `bundle run` can still leave its update running.
+- **No polling.** After one `RUNNING` status, report it and stop. Check again only when the customer asks.
+- **After a failed update**, list tables in every schema the failed config targeted whose `pipeline_id` is this bundle's pipeline (`databricks tables list`), and report them as left behind. Never say nothing was left without that check. If the destination schema changes afterwards, tell the customer the tables under the old schema remain and need manual cleanup; drop them only with explicit approval.
+- **Before reporting success**, confirm the tables landed (`SHOW TABLES IN <catalog>.<schema>` and a `count(*)` per table) and report only the tables you verified.
+
 ## 1.7 Per-environment parameterization
 
 Declare in `variables`, override in `targets.<env>.variables`. Precedence, lowest to highest:
@@ -488,7 +515,7 @@ targets:
 
 Practical guidance:
 
-- Parameterize `connection_name`, `dest_catalog`, `dest_schema`, `staging_catalog`, `staging_schema`, `source_database`. These are the values that genuinely differ per environment.
+- Parameterize `connection_name`, `dest_catalog`, `dest_schema` (this skill's generator uses a `schema_suffix` variable, since one bundle can write to several schemas), `staging_catalog`, `staging_schema`, `source_database`. These are the values that genuinely differ per environment.
 - Do **not** put `${bundle.target}` into `catalog`/`schema` after first deploy — see the recreate trap.
 - Do use `${bundle.target}` in `name`, which is mutable and keeps dev/prod pipelines distinguishable in the UI.
 - Use `run_as.service_principal_name` in prod so ingested-table ownership does not follow whoever last deployed.

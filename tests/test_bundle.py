@@ -614,6 +614,7 @@ class TestCatalogCheck:
         monkeypatch.setattr(
             generate_bundle, "cli_workspace_path_lookup", lambda profile: lambda p: None
         )
+        monkeypatch.setattr(generate_bundle, "cli_table_list", lambda profile: lambda c, s: [])
         plan_path = tmp_path / "plan.json"
         plan_path.write_text(json.dumps(_plan(_item())))
         code = generate_bundle.main(

@@ -361,6 +361,8 @@ and (on credit-based plans) `credits_used`, from the Fivetran Platform Connector
 tables. Supports direct Databricks, Snowflake, BigQuery, and Redshift queries,
 CSV import, or SQL print for other warehouses. Without the Platform Connector,
 the spend the customer shares is recorded as given in `fivetran_spend.json`.
+`fivetran_consumption.py review-spend` lists spend an earlier session recorded
+so the customer can keep or clear it (`--clear`) before Gate 1.
 
 ### Stage 3: Map
 
@@ -402,11 +404,17 @@ even with `--force`, unless `--keep-existing-resources` is passed. With
 `--databricks-profile` it also gives a pipeline key a suffix when another
 bundle already deploys a pipeline under that name, and warns when a bundle with
 the same name was already deployed. It never binds existing pipelines.
+The `dev` target writes to `<schema>_dev` (a `schema_suffix` bundle variable),
+and with `--databricks-profile` the bundle README lists destination tables that
+already exist and are owned by another pipeline, with that pipeline's bundle.
 
 ### Stage 6: Deploy
 
-Validates and deploys the bundle. Includes a five-step cutover protocol with
-parallel-run validation before pausing Fivetran.
+Validates and deploys the bundle to `dev`; running it is a separate approval.
+Before a re-run the agent checks the pipeline's updates and the job's runs,
+reports a failed update's leftover tables, and reports success only for tables
+it saw land. Includes a five-step cutover protocol with parallel-run validation
+before pausing Fivetran.
 
 ---
 
@@ -425,8 +433,9 @@ export, and writes it only after a yes.
 The agent presents: bundle contents, excluded connections, manual steps
 (browser-OAuth connections listed under "Manual connections" in the bundle
 README), schedule mapping, and the bundle folder: resource files that were
-already there and pipeline keys renamed to avoid a name clash. The customer may adjust schemas,
-frequencies, or table scope.
+already there, pipeline keys renamed to avoid a name clash, and destination
+tables another pipeline owns. The customer may adjust schemas, frequencies, or
+table scope, and approves a deploy to `dev` without a run.
 
 Neither gate can be skipped. Do not proceed until the customer explicitly
 approves.
