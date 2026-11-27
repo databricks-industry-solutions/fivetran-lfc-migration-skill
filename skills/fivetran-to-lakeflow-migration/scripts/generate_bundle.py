@@ -215,6 +215,19 @@ def check_catalogs(
     return found
 
 
+def fall_back_dev_catalog(dev_catalog: str, target_catalog: str, found: dict) -> str:
+    """Use the target catalog for dev when the dev catalog is missing. Dev still
+    writes to its own ``<schema>_dev`` schemas through ``schema_suffix``."""
+    if dev_catalog == target_catalog or found.get(dev_catalog) is not False:
+        return dev_catalog
+    print(
+        f"  dev catalog '{dev_catalog}' not found: the dev target uses '{target_catalog}' "
+        f"with {DEV_SCHEMA_SUFFIX} schemas instead. Tell the customer.",
+        file=sys.stderr,
+    )
+    return target_catalog
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-p", "--plan", type=Path, default=Path("out/plan.json"))
@@ -229,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--databricks-profile",
         help="CLI profile of the target workspace, to confirm (read-only) that the dev and "
-        "prod catalogs exist; warns if they do not",
+        "prod catalogs exist; a missing dev catalog falls back to the target catalog",
     )
     parser.add_argument(
         "--force", action="store_true", help="overwrite an existing output directory"
@@ -273,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         catalog_exists = check_catalogs(
             [dev_catalog, plan["target_catalog"]], cli_catalog_lookup(args.databricks_profile)
         )
+        dev_catalog = fall_back_dev_catalog(dev_catalog, plan["target_catalog"], catalog_exists)
         renamed_keys = check_pipeline_names(plan, args.name, args.databricks_profile)
         plan = rename_pipeline_keys(plan, renamed_keys)
         check_bundle_state(args.name, args.databricks_profile)

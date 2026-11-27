@@ -98,7 +98,11 @@ before Gate 1, say Gate 1 comes first, finish stages 1–4, present the Gate 1
 summary and the export question, and get the Gate 1 answer before generating
 any bundle file. Ask each approval (Gate 1, Gate 2, the deploy, each run) as a
 question the customer answers (`askUserQuestions` in Genie Code), not as a
-suggested follow-up.
+suggested follow-up. If Auto Mode blocks a call the customer approved that way,
+report it as a blocked write and ask them to type a confirmation; a typed
+`I confirm: <step>` reply then counts for that step. Suggested follow-ups alone
+are never approval and never replace the question for a later step. Never put
+internal notes (todo text, plans, tool names) in chat.
 
 ### Gate 1 — Assessment review (after stages 1–4)
 
@@ -130,6 +134,9 @@ Present the following to the customer before any bundle is generated:
    spend was recorded.
 7. **Recommendation** — which connections to migrate first (lowest effort,
    highest MAR), which to defer, and which need a different architecture.
+
+Write the full Gate 1 summary in a chat message first, then ask the Gate 1
+questions in the same turn; never ask them before the summary.
 
 **Wait here** and ask two questions:
 
@@ -270,6 +277,11 @@ for tables nobody customised. Managed connectors, SaaS and database alike,
 read primary keys from the source themselves, so do not re-run discovery or
 pull column metadata to "resolve" keys. Excluded and hashed columns already
 come back without it.
+
+If discovery prints nothing, or stops without a result or an error, say it did
+not run or did not finish; do not guess a cause. Ask whether to run it again
+or limit it to the connections the customer named (`--connection <id or
+destination schema>`, repeatable). Never narrow the scope without asking.
 
 **Fivetran MCP path:** use `fivetran_list_groups`, `fivetran_list_connections_in_group`,
 and `fivetran_get_connection_schema_config`, then assemble `inventory.json`
@@ -568,6 +580,9 @@ python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
 `<target_catalog>_dev`). With `--databricks-profile`, the generator checks
 read-only (`databricks catalogs get`) that the dev and prod catalogs exist and
 warns, without failing, when one does not; the bundle README records the result.
+A missing dev catalog falls back to the target catalog, where `dev` still writes
+to its own `<schema>_dev` schemas; the generator prints this, so tell the
+customer.
 The bundle never creates catalogs. The `prod` target sets `workspace.root_path`
 to the deploying user's `.bundle` folder, which `mode: production` requires; for
 a team-owned deployment switch it to `/Workspace/Shared/...` and add a `run_as`
@@ -600,7 +615,12 @@ variable (empty by default, `_dev` in `dev`), so a dev pipeline for
 prod destination schema (`databricks tables list <catalog> <schema>
 --omit-columns`), reads the owner of each streaming table from its
 `pipeline_id` (`databricks pipelines get`), and lists every table this bundle
-does not own under "Table conflicts" in the README. Show them at Gate 2. Never
+does not own under "Table conflicts" in the README. Show them at Gate 2. To
+describe a pipeline this bundle does not own, give only its job's pause status
+(`databricks jobs list --name '<job name>'`, then `databricks jobs get <job_id>`:
+`settings.schedule.pause_status`) and its last update time (`latest_updates`
+from `databricks pipelines get`); never infer a schedule from the spacing of
+updates. Never
 drop a table, or change the pipeline that owns it, without the customer's
 explicit approval.
 

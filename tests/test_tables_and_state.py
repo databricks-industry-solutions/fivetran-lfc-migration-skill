@@ -265,3 +265,24 @@ class TestEarlierSpend:
         readme = (tmp_path / "b/README.md").read_text()
         assert "`main_prod_dev.sales_dev.account`" in readme
         assert "fivetran_migration_priyal" in readme
+
+
+def test_missing_dev_catalog_writes_dev_to_the_target_catalog(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        generate_bundle,
+        "cli_catalog_lookup",
+        lambda p: lambda n: {"name": n} if n == "main_prod" else None,
+    )
+    monkeypatch.setattr(generate_bundle, "cli_pipeline_search", lambda p: lambda f: [])
+    monkeypatch.setattr(generate_bundle, "cli_pipeline_lookup", lambda p: lambda i: None)
+    monkeypatch.setattr(generate_bundle, "cli_table_list", lambda p: lambda c, s: [])
+    monkeypatch.setattr(generate_bundle, "cli_current_user", lambda p: "me@example.com")
+    monkeypatch.setattr(generate_bundle, "cli_workspace_path_lookup", lambda p: lambda x: None)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(_plan(_item())))
+    args = ["-p", str(plan_path), "-o", str(tmp_path / "b"), "--name", "acme"]
+    assert generate_bundle.main([*args, "--databricks-profile", "staging"]) == 0
+    root = yaml.safe_load((tmp_path / "b/databricks.yml").read_text())
+    dev = root["targets"]["dev"]["variables"]
+    assert dev["dest_catalog"] == "main_prod"
+    assert dev["schema_suffix"] == "_dev"

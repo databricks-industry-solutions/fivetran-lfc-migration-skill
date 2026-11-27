@@ -77,6 +77,13 @@ def main(argv: list[str] | None = None) -> int:
         help="restrict discovery to a Fivetran group id (repeatable)",
     )
     parser.add_argument(
+        "--connection",
+        action="append",
+        dest="connections",
+        help="restrict discovery to a connection id or destination schema name (repeatable); "
+        "use only when the customer chose to limit the scope",
+    )
+    parser.add_argument(
         "--no-schemas",
         action="store_true",
         help="skip per-table discovery (much faster, but the plan will lack detail)",
@@ -111,9 +118,16 @@ def main(argv: list[str] | None = None) -> int:
             include_schemas=not args.no_schemas,
             include_columns=args.columns,
             max_workers=args.max_workers,
+            connection_names=args.connections,
         )
     except (FivetranError, SecretError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.connections and not inventory["connections"]:
+        print(
+            f"error: no connection matched {', '.join(args.connections)}; nothing was written",
+            file=sys.stderr,
+        )
         return 1
 
     destination = Path(args.output)

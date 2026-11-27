@@ -589,6 +589,18 @@ class TestReadmeSetup:
 
 
 class TestCatalogCheck:
+    def test_missing_dev_catalog_falls_back_to_the_target(self, capsys) -> None:
+        found = {"main_dev": False, "main": True}
+        assert generate_bundle.fall_back_dev_catalog("main_dev", "main", found) == "main"
+        err = capsys.readouterr().err
+        assert "dev catalog 'main_dev' not found" in err and "_dev schemas" in err
+
+    @pytest.mark.parametrize("exists", [True, None])
+    def test_existing_or_unchecked_dev_catalog_is_kept(self, exists, capsys) -> None:
+        found = {"sandbox": exists}
+        assert generate_bundle.fall_back_dev_catalog("sandbox", "main", found) == "sandbox"
+        assert capsys.readouterr().err == ""
+
     def test_missing_catalog_warns_and_does_not_fail(self, capsys) -> None:
         found = generate_bundle.check_catalogs(
             ["main_dev", "main"], lambda name: {"name": name} if name == "main" else None

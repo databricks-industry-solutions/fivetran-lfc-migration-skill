@@ -353,6 +353,8 @@ Run `--help` on any script for the full set of options.
 Calls the Fivetran REST API to inventory all connections, schemas, and tables.
 `--columns` (one request per table, rate-limited) is optional: managed
 connectors read primary keys from the source, so planning does not need it.
+`--connection <id or destination schema>` (repeatable) limits discovery to the
+connections the customer named.
 
 ### Stage 2: Measure
 
@@ -404,7 +406,8 @@ even with `--force`, unless `--keep-existing-resources` is passed. With
 `--databricks-profile` it also gives a pipeline key a suffix when another
 bundle already deploys a pipeline under that name, and warns when a bundle with
 the same name was already deployed. It never binds existing pipelines.
-The `dev` target writes to `<schema>_dev` (a `schema_suffix` bundle variable),
+The `dev` target writes to `<schema>_dev` (a `schema_suffix` bundle variable;
+if the dev catalog does not exist, dev uses the target catalog),
 and with `--databricks-profile` the bundle README lists destination tables that
 already exist and are owned by another pipeline, with that pipeline's bundle.
 
@@ -443,6 +446,8 @@ Neither gate can be skipped. Do not proceed until the customer explicitly
 approves. A request to deploy before Gate 1 still gets the Gate 1 summary and
 export question first. If a write is blocked or fails, the agent says what did
 not change and asks how to proceed.
+If Auto Mode blocks an approved step, a typed `I confirm: <step>` reply counts
+as the approval; suggested follow-ups alone never do.
 
 ---
 
