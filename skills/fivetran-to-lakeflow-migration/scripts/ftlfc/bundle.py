@@ -22,7 +22,9 @@ Three structural facts from the API research shape what gets generated:
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 from typing import Any
 
 import yaml
@@ -38,6 +40,10 @@ GATEWAY_WORKER_NODE = "m5n.large"
 PROD_ROOT_PATH = (
     "/Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}"
 )
+
+DEV_SCHEMA_SUFFIX = "_dev"
+STAGING_SCHEMA = "ingestion_staging"
+_SCHEMA_SUFFIX_VAR = "${var.schema_suffix}"
 
 _MANUAL_CONNECTION_NOTE = (
     "MANUAL. This connector uses browser-based OAuth only, so no script can create its "
@@ -62,6 +68,26 @@ def dev_catalog_for(plan: dict[str, Any], dev_catalog: str | None = None) -> str
     return dev_catalog or f"{plan['target_catalog']}_dev"
 
 
+def migratable_keys(plan: dict[str, Any]) -> list[str]:
+    return [i["target"]["pipeline_name"] for i in plan["items"] if not i["blockers"]]
+
+
+def is_pipeline_name_for(name: str, key: str) -> bool:
+    """True when ``name`` is a deployed name this bundle would give ``key``'s
+    pipeline or gateway, in any target, with or without the dev-mode prefix."""
+    pattern = rf"(?:\[dev [^\]]+\] )?lfc-{re.escape(key)}-(?:gateway-)?[^-]+"
+    return re.fullmatch(pattern, name) is not None
+
+
+def rename_pipeline_keys(plan: dict[str, Any], renames: dict[str, str]) -> dict[str, Any]:
+    """Return a copy of ``plan`` with each renamed key's pipeline_name replaced."""
+    renamed = copy.deepcopy(plan)
+    for item in renamed["items"]:
+        key = item["target"]["pipeline_name"]
+        item["target"]["pipeline_name"] = renames.get(key, key)
+    return renamed
+
+
 def build_bundle(
     plan: dict[str, Any],
     bundle_name: str,
@@ -69,11 +95,19 @@ def build_bundle(
     notification_email: str | None = None,
     dev_catalog: str | None = None,
     catalog_exists: dict[str, bool | None] | None = None,
+    renamed_keys: dict[str, str] | None = None,
+    kept_resources: list[str] | None = None,
+    table_conflicts: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
     """Render a complete bundle as a mapping of relative path -> file contents.
 
     ``catalog_exists`` maps a catalog name to True or False when the workspace was
     checked, or None when the check could not run; it only feeds the README.
+    ``renamed_keys`` (original key -> unique key, already applied to ``plan``) and
+    ``kept_resources`` (resource files already in the output folder that will
+    deploy with this bundle) are reported in the README, as are
+    ``table_conflicts``: destination tables that already exist and belong to
+    something other than this bundle (keys ``target``, ``table``, ``owner``).
     """
     migratable = [i for i in plan["items"] if not i["blockers"]]
     dev_catalog = dev_catalog_for(plan, dev_catalog)
@@ -102,6 +136,9 @@ def build_bundle(
         has_placeholders=any(
             "REPLACE_ME" in line for line in script.splitlines() if not line.startswith("#")
         ),
+        renamed_keys=renamed_keys or {},
+        kept_resources=kept_resources or [],
+        table_conflicts=table_conflicts or [],
     )
     return files
 
@@ -111,7 +148,9 @@ def _root(
 ) -> dict[str, Any]:
     catalog = plan["target_catalog"]
 
-    def target(mode: str, dest_catalog: str, **extra: Any) -> dict[str, Any]:
+    def target(
+        mode: str, dest_catalog: str, schema_suffix: str | None = None, **extra: Any
+    ) -> dict[str, Any]:
         # Built fresh per target: sharing one dict makes PyYAML emit an anchor
         # and an alias, which is valid but confusing in a file humans review.
         spec: dict[str, Any] = {"mode": mode, **extra}
@@ -123,6 +162,12 @@ def _root(
         if workspace:
             spec["workspace"] = workspace
         spec["variables"] = {"dest_catalog": dest_catalog}
+        if schema_suffix:
+            # Dev stages in its own catalog and schema too, so dev and prod never
+            # share a gateway or integrated CDC staging volume, even in one catalog.
+            spec["variables"]["staging_catalog"] = dest_catalog
+            spec["variables"]["staging_schema"] = f"{STAGING_SCHEMA}{schema_suffix}"
+            spec["variables"]["schema_suffix"] = schema_suffix
         return spec
 
     return {
@@ -139,13 +184,19 @@ def _root(
             },
             "staging_schema": {
                 "description": "Schema holding gateway and integrated CDC staging volumes",
-                "default": "ingestion_staging",
+                "default": STAGING_SCHEMA,
+            },
+            "schema_suffix": {
+                "description": "Appended to every destination schema; dev sets _dev",
+                "default": "",
             },
         },
         "targets": {
-            # Development mode prefixes resource names and pauses schedules, so
-            # a dev deploy cannot compete with production for the same source.
-            "dev": target("development", dev_catalog, default=True),
+            # Development mode prefixes resource names, and its own schemas keep a
+            # dev run from writing into tables prod or another pipeline owns.
+            "dev": target(
+                "development", dev_catalog, default=True, schema_suffix=DEV_SCHEMA_SUFFIX
+            ),
             "prod": target("production", catalog),
         },
     }
@@ -161,7 +212,7 @@ def _pipeline(item: dict[str, Any], notification_email: str | None) -> dict[str,
         "serverless": True,
         "channel": "CURRENT",
         "catalog": "${var.dest_catalog}",
-        "schema": target["destination_schema"],
+        "schema": target["destination_schema"] + _SCHEMA_SUFFIX_VAR,
         "ingestion_definition": _ingestion_definition(item, needs_gateway, key),
     }
 
@@ -255,7 +306,7 @@ def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
             "source_url": obj.get("source_url")
             or f"REPLACE_WITH_RAAS_URL_FOR_{obj['source_table']}",
             "destination_catalog": "${var.dest_catalog}",
-            "destination_schema": obj["destination_schema"],
+            "destination_schema": obj["destination_schema"] + _SCHEMA_SUFFIX_VAR,
             "destination_table": obj["destination_table"],
         }
     else:
@@ -263,7 +314,7 @@ def _object_spec(obj: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
             "source_schema": obj["source_schema"],
             "source_table": obj["source_table"],
             "destination_catalog": "${var.dest_catalog}",
-            "destination_schema": obj["destination_schema"],
+            "destination_schema": obj["destination_schema"] + _SCHEMA_SUFFIX_VAR,
             "destination_table": obj["destination_table"],
         }
         # source_catalog is the source database name. Required for integrated
@@ -298,13 +349,14 @@ def _job(item: dict[str, Any], notification_email: str | None) -> dict[str, Any]
         ],
     }
 
+    # No pause_status: development mode pauses schedules only when it is unset,
+    # and jobs default to UNPAUSED in production.
     if schedule["mode"] == "continuous":
-        job["continuous"] = {"pause_status": "UNPAUSED"}
+        job["continuous"] = {}
     else:
         job["schedule"] = {
             "quartz_cron_expression": schedule["quartz_cron_expression"],
             "timezone_id": schedule.get("timezone_id", "UTC"),
-            "pause_status": "UNPAUSED",
         }
 
     if notification_email:
@@ -497,6 +549,9 @@ def _bundle_readme(
     dev_catalog: str,
     catalog_exists: dict[str, bool | None],
     has_placeholders: bool,
+    renamed_keys: dict[str, str],
+    kept_resources: list[str],
+    table_conflicts: list[dict[str, str]],
 ) -> str:
     summary = plan["summary"]
     prod_catalog = plan["target_catalog"]
@@ -530,10 +585,12 @@ def _bundle_readme(
         "# 2. Validate. --strict promotes warnings to errors.",
         "databricks bundle validate --strict -t dev",
         "",
-        "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules.",
+        "# 3. Deploy to dev first. Development mode prefixes names and pauses schedules;",
+        "#    run a dev sync with `databricks bundle run <key> -t dev`.",
         "databricks bundle deploy -t dev",
         "",
-        "# 4. Check what landed. Validate prod only once you've decided to promote, then deploy it.",
+        "# 4. Check what landed. Validate prod only once you've decided to promote,",
+        "#    then deploy it.",
         "databricks bundle summary -t dev",
         "databricks bundle validate --strict -t prod",
         "databricks bundle deploy -t prod",
@@ -562,12 +619,37 @@ def _bundle_readme(
             "- A pipeline fails if a destination table already exists, so deploy into a clean "
             "schema or set `destination_table` explicitly."
         ),
+        (
+            f"- The dev target writes to `<schema>{DEV_SCHEMA_SUFFIX}` (`schema_suffix`), so a "
+            "dev run never writes into the schemas prod uses, and stages in "
+            f"`{STAGING_SCHEMA}{DEV_SCHEMA_SUFFIX}`, so dev and prod never share a staging volume."
+        ),
     ]
 
     if summary["gateways_required"]:
         lines.append(
             "- Gateways run continuously on classic compute and are billed even when the "
-            "ingestion pipeline is idle."
+            "ingestion pipeline is idle. A gateway must keep `continuous: true`, and "
+            "`mode: development` pauses jobs, not pipelines, so dev mode does not stop a "
+            "gateway: once started it reads the source until stopped. Stopping it "
+            "(`databricks pipelines stop <pipeline_id>`) can drop source changes and force "
+            "a full refresh."
+        )
+
+    if kept_resources:
+        lines.append(
+            "- This folder already held the resource files below, and they deploy with this "
+            "bundle: "
+            + ", ".join(f"`{path}`" for path in kept_resources)
+            + ". Remove any the migration did not choose before deploying."
+        )
+
+    if renamed_keys:
+        lines.append(
+            "- Another bundle already deploys pipelines under these names, so these keys were "
+            "given a suffix: "
+            + ", ".join(f"`{old}` -> `{new}`" for old, new in renamed_keys.items())
+            + ". Do not bind the existing pipelines or run them in place of this bundle's."
         )
 
     if summary.get("integrated_cdc_pipelines"):
@@ -577,6 +659,24 @@ def _bundle_readme(
             "through the `${var.staging_catalog}.${var.staging_schema}` volume the pipeline "
             "creates. They run in triggered mode on their companion job."
         )
+
+    if table_conflicts:
+        lines += [
+            "",
+            "## Table conflicts",
+            "",
+            (
+                "These destination tables already exist and belong to something other than this "
+                "bundle. A table belongs to one pipeline at a time, so the update fails on them. "
+                "Pick another schema; do not move them to this bundle's pipeline or drop them "
+                "without the owner's approval."
+            ),
+            "",
+            "| Target | Table | Owner |",
+            "|---|---|---|",
+        ]
+        for c in table_conflicts:
+            lines.append(f"| {c['target']} | `{c['table']}` | {c['owner']} |")
 
     if manual:
         lines += [

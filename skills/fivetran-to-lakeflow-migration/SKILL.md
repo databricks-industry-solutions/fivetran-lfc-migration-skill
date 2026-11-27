@@ -93,7 +93,16 @@ history keeps it.
 
 There are two mandatory gates. At each one the agent **must stop, present the
 summary, and wait for an explicit "proceed"** from the human. Never skip a gate,
-even if there are no blockers.
+even if there are no blockers. If the customer asks to deploy or build a bundle
+before Gate 1, say Gate 1 comes first, finish stages 1–4, present the Gate 1
+summary and the export question, and get the Gate 1 answer before generating
+any bundle file. Ask each approval (Gate 1, Gate 2, the deploy, each run) as a
+question the customer answers (`askUserQuestions` in Genie Code), not as a
+suggested follow-up. If Auto Mode blocks a call the customer approved that way,
+report it as a blocked write and ask them to type a confirmation; a typed
+`I confirm: <step>` reply then counts for that step. Suggested follow-ups alone
+are never approval and never replace the question for a later step. Never put
+internal notes (todo text, plans, tool names) in chat.
 
 ### Gate 1 — Assessment review (after stages 1–4)
 
@@ -126,6 +135,9 @@ Present the following to the customer before any bundle is generated:
 7. **Recommendation** — which connections to migrate first (lowest effort,
    highest MAR), which to defer, and which need a different architecture.
 
+Write the full Gate 1 summary in a chat message first, then ask the Gate 1
+questions in the same turn; never ask them before the summary.
+
 **Wait here** and ask two questions:
 
 1. Which connections to migrate: all migratable ones, a subset (record the
@@ -155,6 +167,20 @@ Present the generated bundle for review before any deployment:
    in `create_connections.sh`), which source systems need admin setup.
 5. **Schedule mapping** — Fivetran sync frequencies and their Quartz cron
    equivalents.
+6. **Bundle folder and names** — the output folder and bundle name, any
+   resource files that were already in the folder and will deploy with the
+   bundle (`--keep-existing-resources`), and any pipeline keys the generator
+   suffixed because another bundle already uses the name.
+7. **Table conflicts** — destination tables that already exist and are not
+   owned by this bundle's pipelines, with the owning pipeline and bundle
+   (listed under "Table conflicts" in the bundle README). A streaming table has
+   one owning pipeline, so the first update fails on each one.
+
+Show all of the above in the message right before the approval question, and
+summarize the dev `bundle validate` result, the name and table checks, the UC
+connections needed, and the cutover plan in the question itself. Ask for
+approval to **deploy to dev (no run)**. Running is a separate approval after the
+deploy (stage 6).
 
 **Wait here.** The customer may want to:
 - Adjust destination schemas or table names
@@ -206,6 +232,15 @@ Databricks page that lists its supported tables) that the plan's warnings and
 blockers link. Before committing to a date with a customer, check that page
 and the workspace's own Previews page.
 
+**Report blocked or failed writes.** If a write is blocked (Auto Mode, missing
+permission) or fails, say so plainly, name each change that did not happen
+(for example "the October spend entry was not cleared"), and ask how to
+proceed. Never continue, or report, as if it happened. `review-spend --clear`
+exits 1 and says nothing was cleared when it cannot write the file.
+
+**Use only verified CLI flags.** Use the `databricks` flags this skill gives,
+or ones `databricks <command> --help` lists; check `--help` before any other.
+
 ## Stage 1: Discover (Assessment)
 
 Needs a Fivetran API key and secret (Account Settings → API Config), or the
@@ -242,6 +277,11 @@ for tables nobody customised. Managed connectors, SaaS and database alike,
 read primary keys from the source themselves, so do not re-run discovery or
 pull column metadata to "resolve" keys. Excluded and hashed columns already
 come back without it.
+
+If discovery prints nothing, or stops without a result or an error, say it did
+not run or did not finish; do not guess a cause. Ask whether to run it again
+or limit it to the connections the customer named (`--connection <id or
+destination schema>`, repeatable). Never narrow the scope without asking.
 
 **Fivetran MCP path:** use `fivetran_list_groups`, `fivetran_list_connections_in_group`,
 and `fivetran_get_connection_schema_config`, then assemble `inventory.json`
@@ -350,7 +390,22 @@ python3 ${SCRIPTS}/fivetran_consumption.py spend --month 2026-09 \
   --note "Enterprise plan, renews 2027-03" -o ${FTLFC_OUT}/fivetran_spend.json
 ```
 
-Recording the same month again replaces the earlier entry.
+Recording the same month again replaces the earlier entry. When
+`fivetran_spend.json` already exists, list what an earlier session recorded
+before asking, then ask whether to keep or clear it:
+
+```bash
+python3 ${SCRIPTS}/fivetran_consumption.py review-spend \
+  --spend ${FTLFC_OUT}/fivetran_spend.json --since <session start, ISO 8601>
+# only if the customer says clear:
+python3 ${SCRIPTS}/fivetran_consumption.py review-spend \
+  --spend ${FTLFC_OUT}/fivetran_spend.json --since <session start> --clear
+```
+
+Pass `--spend` at Gate 1 only for spend given or kept in this session; if the
+customer skipped spend, show none. If `--clear` fails, the entries are still in
+the file: tell the customer, and either label them at Gate 1 as recorded in an
+earlier session or leave `--spend` off, as they choose.
 
 ## Stage 3: Map (Conversion)
 
@@ -387,7 +442,9 @@ source-side setup.
 
 **Reusing existing connections.** Before running this stage, ask whether any
 Unity Catalog connection already exists for a source being migrated. If one
-does, pass it rather than hand-editing names in the generated bundle:
+does, pass it rather than hand-editing names in the generated bundle. Pass
+`--use-connection` only for connections the customer names in this session,
+never from an earlier session's notes or plan:
 
 ```bash
 python3 ${SCRIPTS}/plan_migration.py -i ${FTLFC_OUT}/inventory.json -c <dest_catalog> \
@@ -523,10 +580,51 @@ python3 ${SCRIPTS}/generate_bundle.py -p ${FTLFC_OUT}/plan.json \
 `<target_catalog>_dev`). With `--databricks-profile`, the generator checks
 read-only (`databricks catalogs get`) that the dev and prod catalogs exist and
 warns, without failing, when one does not; the bundle README records the result.
+A missing dev catalog falls back to the target catalog, where `dev` still writes
+to its own `<schema>_dev` schemas; the generator prints this, so tell the
+customer.
 The bundle never creates catalogs. The `prod` target sets `workspace.root_path`
 to the deploying user's `.bundle` folder, which `mode: production` requires; for
 a team-owned deployment switch it to `/Workspace/Shared/...` and add a `run_as`
 service principal (see `references/bundles.md`).
+
+Write each migration to a new, empty `-o` folder with its own `--name`. Bundles
+with the same name share deployment state, so a deploy replaces the other
+bundle's resources; with `--databricks-profile` the generator warns when your
+`.bundle/<name>` folder already exists. A non-empty folder is refused, and the
+error lists the bundle files it holds. `--force` still refuses when the folder
+holds resource files this plan does not generate, since `include:
+resources/*.yml` would deploy them; show them to the customer and use a new
+folder unless they choose `--keep-existing-resources`. Deploy only the
+connections approved at Gate 1, plus resources the customer chose to keep.
+
+With `--databricks-profile`, the generator also lists pipelines named like each
+`lfc-<key>-` (`databricks pipelines list-pipelines --filter`) and reads each
+match's `spec.deployment.metadata_file_path` (`databricks pipelines get`). A
+pipeline that this bundle did not deploy is a clash: the key gets a suffix
+(`<key>_2`), and the bundle README lists the rename. Never run `databricks
+bundle deployment bind`, set `allow_duplicate_names`, or run another bundle's
+pipeline in place of this one. If a deploy still fails because a pipeline name
+is already used, regenerate with `--databricks-profile` and present Gate 2
+again.
+
+The `dev` target writes to its own schemas: the bundle sets a `schema_suffix`
+variable (empty by default, `_dev` in `dev`), so a dev pipeline for
+`pagerduty` writes to `pagerduty_dev` and never to the prod schema. Dev also
+stages in `ingestion_staging_dev`, so dev and prod never share a gateway or
+integrated CDC staging volume, even in one catalog. With
+`--databricks-profile`, the generator also lists the tables in each dev and
+prod destination schema (`databricks tables list <catalog> <schema>
+--omit-columns`), reads the owner of each streaming table from its
+`pipeline_id` (`databricks pipelines get`), and lists every table this bundle
+does not own under "Table conflicts" in the README. Show them at Gate 2. To
+describe a pipeline this bundle does not own, give only its job's pause status
+(`databricks jobs list --name '<job name>'`, then `databricks jobs get <job_id>`:
+`settings.schedule.pause_status`) and its last update time (`latest_updates`
+from `databricks pipelines get`); never infer a schedule from the spacing of
+updates. Never
+drop a table, or change the pipeline that owns it, without the customer's
+explicit approval.
 
 Produces a bundle the customer keeps in their own repo: one ingestion pipeline
 per connection, a gateway pipeline where gateway-based CDC needs one, and a
@@ -559,6 +657,27 @@ cd ${FTLFC_OUT}/bundle
 databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
 ```
+
+Deploying and running are separate approvals: after the deploy, ask before
+`databricks bundle run`, and run only resource keys this bundle defines. If a
+deploy or run fails, stop and show the error. Before a re-run, check the
+pipeline's latest updates and the job's runs; give a cause for an update only
+from that evidence. Check a running update once, report it, and stop; check
+again only when the customer asks. Report success only for tables you saw land
+in the target schema. After a failed update, list the tables it left behind.
+Commands and details: "Runs" in `references/bundles.md`.
+
+Generated jobs never set `pause_status`: `mode: development` pauses every dev
+schedule and trigger, so a dev sync happens only through an approved `bundle
+run`, and prod jobs start `UNPAUSED` once the customer confirms the prod deploy.
+
+Gateways are the exception: a gateway must keep `continuous: true`, and
+`mode: development` pauses jobs, not pipelines, so it never stops a gateway.
+Once started, a gateway reads the source on classic compute until stopped.
+For gateway connections, never say a deploy runs nothing: the deploy and run
+approvals say the gateway runs continuously from then on. Stopping it
+(`databricks pipelines stop <pipeline_id>`) is its own approval, since a
+stopped gateway can miss source changes and need a full refresh.
 
 Then the customer cuts over in this order (do not compress it):
 

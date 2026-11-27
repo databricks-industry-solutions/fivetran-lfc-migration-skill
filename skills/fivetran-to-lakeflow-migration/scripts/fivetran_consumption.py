@@ -5,6 +5,10 @@ The skill never prices Lakeflow Connect, compares costs, or states a saving.
 It records what the customer consumes and pays in Fivetran, as given, so the
 account team can model cost outside the skill.
 
+    # Stage 2: list spend an earlier session recorded; --clear only if the customer says so.
+    python3 fivetran_consumption.py review-spend --spend out/fivetran_spend.json \\
+        --since 2026-11-25T14:00:00+00:00
+
     # Stage 2: record the spend the customer shared (optional, never required).
     python3 fivetran_consumption.py spend --month 2026-09 --monthly-usd 12000 \\
         --basis invoice --monthly-mar 25000000 -o out/fivetran_spend.json
@@ -22,6 +26,7 @@ account team can model cost outside the skill.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -41,6 +46,7 @@ from ftlfc.consumption import (
     plan_group_ids,
     record_spend,
     save_spend,
+    spend_recorded_before,
     summary_lines,
     write_export,
 )
@@ -60,6 +66,19 @@ def main(argv: list[str] | None = None) -> int:
     spend.add_argument("--monthly-mar", type=int, help="monthly MAR, if the customer shared it")
     spend.add_argument("--note", help="plan, renewal date, or anything else they shared")
     spend.add_argument("-o", "--output", type=Path, default=Path("out/fivetran_spend.json"))
+
+    review = sub.add_parser(
+        "review-spend", help="list spend recorded in an earlier session; optionally clear it"
+    )
+    review.add_argument("--spend", type=Path, default=Path("out/fivetran_spend.json"))
+    review.add_argument(
+        "--since",
+        type=dt.datetime.fromisoformat,
+        help="session start (ISO 8601); entries recorded before it are from an earlier session",
+    )
+    review.add_argument(
+        "--clear", action="store_true", help="remove the listed entries, after the customer agrees"
+    )
 
     for name, help_text in (
         ("summary", "print the Gate 1 consumption and spend sections; writes nothing"),
@@ -87,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "spend":
             return _spend(args)
+        if args.command == "review-spend":
+            return _review_spend(args)
         return _summary_or_export(args)
     except (ConsumptionError, MarError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -104,6 +125,34 @@ def _spend(args: argparse.Namespace) -> int:
     )
     save_spend(args.output, entries)
     print(f"Recorded Fivetran spend for {args.month} in {args.output} (as given, not priced)")
+    return 0
+
+
+def _review_spend(args: argparse.Namespace) -> int:
+    entries = load_spend(args.spend)
+    earlier = spend_recorded_before(entries, args.since)
+    if not earlier:
+        print("No Fivetran spend from an earlier session.")
+        return 0
+    for e in earlier:
+        print(
+            f"  {e.get('period_month')}: {e.get('monthly_usd')} USD/month, "
+            f"basis {e.get('basis') or 'unspecified'}, recorded {e.get('recorded_at') or 'unknown'}"
+        )
+    if not args.clear:
+        print("Ask the customer whether to keep or clear these before Gate 1.")
+        return 0
+    try:
+        save_spend(args.spend, [e for e in entries if e not in earlier])
+    except OSError as exc:
+        print(
+            f"error: nothing was cleared; {len(earlier)} earlier entr"
+            f"{'y' if len(earlier) == 1 else 'ies'} remain in {args.spend} ({exc}). "
+            "Tell the customer and ask how to proceed.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Cleared {len(earlier)} earlier spend entr{'y' if len(earlier) == 1 else 'ies'}.")
     return 0
 
 

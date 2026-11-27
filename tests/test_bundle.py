@@ -111,6 +111,18 @@ class TestRoot:
         assert root["targets"]["dev"]["variables"]["dest_catalog"] == "main_prod_dev"
         assert root["targets"]["prod"]["variables"]["dest_catalog"] == "main_prod"
 
+    def test_dev_stages_apart_from_prod(self) -> None:
+        # With the dev catalog fallback both targets can share a catalog, so the
+        # staging schema must differ for gateway and integrated CDC volumes.
+        files = build_bundle(_plan(_item()), "acme", dev_catalog="main_prod")
+        root = _load(files, "databricks.yml")
+        dev, prod = root["targets"]["dev"]["variables"], root["targets"]["prod"]["variables"]
+        assert dev["staging_catalog"] == "main_prod"
+        assert dev["staging_schema"] == "ingestion_staging_dev"
+        assert "staging_schema" not in prod
+        assert root["variables"]["staging_schema"]["default"] == "ingestion_staging"
+        assert "`ingestion_staging_dev`" in files["README.md"]
+
     def test_dev_catalog_can_be_overridden(self) -> None:
         files = build_bundle(_plan(_item()), "acme", dev_catalog="sandbox")
         root = _load(files, "databricks.yml")
@@ -198,6 +210,13 @@ class TestGatewayPipeline:
         ]["sales_abc_gateway"]
         assert gateway["continuous"] is True
         assert gateway["serverless"] is False
+
+    def test_readme_says_dev_mode_does_not_stop_the_gateway(self, files: dict[str, str]) -> None:
+        # Gateways must stay continuous and dev mode pauses only jobs, so the
+        # README must not suggest a dev deploy leaves the gateway idle.
+        readme = files["README.md"]
+        assert "`mode: development` pauses jobs, not pipelines" in readme
+        assert "`databricks pipelines stop <pipeline_id>`" in readme
 
     def test_gateway_declares_its_staging_storage(self, files: dict[str, str]) -> None:
         gateway = _load(files, "resources/sales_abc_gateway.pipeline.yml")["resources"][
@@ -325,8 +344,17 @@ class TestJob:
         item = _item(schedule={"mode": "continuous", "max_concurrent_runs": 1})
         files = build_bundle(_plan(item), "acme")
         job = _load(files, "resources/sales_abc.job.yml")["resources"]["jobs"]["sales_abc_schedule"]
-        assert job["continuous"] == {"pause_status": "UNPAUSED"}
+        assert job["continuous"] == {}
         assert "schedule" not in job
+
+    def test_jobs_leave_pause_status_to_the_deployment_mode(self) -> None:
+        for schedule in (None, {"mode": "continuous", "max_concurrent_runs": 1}):
+            item = _item(schedule=schedule) if schedule else _item()
+            files = build_bundle(_plan(item), "acme")
+            assert "pause_status" not in files["resources/sales_abc.job.yml"]
+            root = _load(files, "databricks.yml")
+            assert "presets" not in root["targets"]["dev"]
+            assert "presets" not in root["targets"]["prod"]
 
     def test_notifications_are_wired_when_an_email_is_given(self) -> None:
         files = build_bundle(_plan(_item()), "acme", notification_email="a@b.com")
@@ -580,6 +608,18 @@ class TestReadmeSetup:
 
 
 class TestCatalogCheck:
+    def test_missing_dev_catalog_falls_back_to_the_target(self, capsys) -> None:
+        found = {"main_dev": False, "main": True}
+        assert generate_bundle.fall_back_dev_catalog("main_dev", "main", found) == "main"
+        err = capsys.readouterr().err
+        assert "dev catalog 'main_dev' not found" in err and "_dev schemas" in err
+
+    @pytest.mark.parametrize("exists", [True, None])
+    def test_existing_or_unchecked_dev_catalog_is_kept(self, exists, capsys) -> None:
+        found = {"sandbox": exists}
+        assert generate_bundle.fall_back_dev_catalog("sandbox", "main", found) == "sandbox"
+        assert capsys.readouterr().err == ""
+
     def test_missing_catalog_warns_and_does_not_fail(self, capsys) -> None:
         found = generate_bundle.check_catalogs(
             ["main_dev", "main"], lambda name: {"name": name} if name == "main" else None
@@ -608,6 +648,13 @@ class TestCatalogCheck:
             "cli_catalog_lookup",
             lambda profile: lambda name: checked.append((profile, name)) or {"name": name},
         )
+        monkeypatch.setattr(generate_bundle, "cli_pipeline_search", lambda profile: lambda f: [])
+        monkeypatch.setattr(generate_bundle, "cli_pipeline_lookup", lambda profile: lambda i: None)
+        monkeypatch.setattr(generate_bundle, "cli_current_user", lambda profile: "me@example.com")
+        monkeypatch.setattr(
+            generate_bundle, "cli_workspace_path_lookup", lambda profile: lambda p: None
+        )
+        monkeypatch.setattr(generate_bundle, "cli_table_list", lambda profile: lambda c, s: [])
         plan_path = tmp_path / "plan.json"
         plan_path.write_text(json.dumps(_plan(_item())))
         code = generate_bundle.main(

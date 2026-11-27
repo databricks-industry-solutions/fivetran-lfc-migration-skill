@@ -353,6 +353,8 @@ Run `--help` on any script for the full set of options.
 Calls the Fivetran REST API to inventory all connections, schemas, and tables.
 `--columns` (one request per table, rate-limited) is optional: managed
 connectors read primary keys from the source, so planning does not need it.
+`--connection <id or destination schema>` (repeatable) limits discovery to the
+connections the customer named.
 
 ### Stage 2: Measure
 
@@ -361,6 +363,8 @@ and (on credit-based plans) `credits_used`, from the Fivetran Platform Connector
 tables. Supports direct Databricks, Snowflake, BigQuery, and Redshift queries,
 CSV import, or SQL print for other warehouses. Without the Platform Connector,
 the spend the customer shares is recorded as given in `fivetran_spend.json`.
+`fivetran_consumption.py review-spend` lists spend an earlier session recorded
+so the customer can keep or clear it (`--clear`) before Gate 1.
 
 ### Stage 3: Map
 
@@ -396,10 +400,27 @@ under the deploying user's `.bundle` folder (`workspace.root_path`, required by
 `mode: production`). The bundle README lists renamed and Lakeflow Connect-only
 tables.
 
+Write each migration to a new `-o` folder with its own `--name`. The generator
+refuses a folder that already holds resource files the plan does not generate,
+even with `--force`, unless `--keep-existing-resources` is passed. With
+`--databricks-profile` it also gives a pipeline key a suffix when another
+bundle already deploys a pipeline under that name, and warns when a bundle with
+the same name was already deployed. It never binds existing pipelines.
+The `dev` target writes to `<schema>_dev` (a `schema_suffix` bundle variable;
+if the dev catalog does not exist, dev uses the target catalog) and stages in
+`ingestion_staging_dev`,
+and with `--databricks-profile` the bundle README lists destination tables that
+already exist and are owned by another pipeline, with that pipeline's bundle.
+
 ### Stage 6: Deploy
 
-Validates and deploys the bundle. Includes a five-step cutover protocol with
-parallel-run validation before pausing Fivetran.
+Validates and deploys the bundle to `dev`; running it is a separate approval.
+Generated jobs leave `pause_status` unset, so development mode pauses dev
+schedules and prod schedules run after a confirmed prod deploy.
+Before a re-run the agent checks the pipeline's updates and the job's runs,
+reports a failed update's leftover tables, and reports success only for tables
+it saw land. Includes a five-step cutover protocol with parallel-run validation
+before pausing Fivetran.
 
 ---
 
@@ -417,11 +438,17 @@ export, and writes it only after a yes.
 
 The agent presents: bundle contents, excluded connections, manual steps
 (browser-OAuth connections listed under "Manual connections" in the bundle
-README), and schedule mapping. The customer may adjust schemas,
-frequencies, or table scope.
+README), schedule mapping, and the bundle folder: resource files that were
+already there, pipeline keys renamed to avoid a name clash, and destination
+tables another pipeline owns. The customer may adjust schemas, frequencies, or
+table scope, and approves a deploy to `dev` without a run.
 
 Neither gate can be skipped. Do not proceed until the customer explicitly
-approves.
+approves. A request to deploy before Gate 1 still gets the Gate 1 summary and
+export question first. If a write is blocked or fails, the agent says what did
+not change and asks how to proceed.
+If Auto Mode blocks an approved step, a typed `I confirm: <step>` reply counts
+as the approval; suggested follow-ups alone never do.
 
 ---
 

@@ -37,8 +37,12 @@ def build_inventory(
     include_schemas: bool = True,
     include_columns: bool = False,
     max_workers: int = 8,
+    connection_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Discover the full Fivetran setup reachable by the client's credentials.
+
+    ``connection_names`` (connection ids or destination schema names) limits the
+    inventory to those connections, for when the customer chose a narrower scope.
 
     ``include_columns`` triggers a per-table crawl of the columns endpoint. It
     is the only way to learn primary keys for tables nobody has customised, but
@@ -57,6 +61,8 @@ def build_inventory(
     for group in groups:
         for raw in client.list_connections(group["id"]):
             if raw.get("id") in seen_ids:
+                continue
+            if connection_names and not {raw.get("id"), raw.get("schema")} & set(connection_names):
                 continue
             seen_ids.add(raw.get("id"))
             connections.append(_normalise_connection(raw, default_group_id=group["id"]))
