@@ -111,6 +111,18 @@ class TestRoot:
         assert root["targets"]["dev"]["variables"]["dest_catalog"] == "main_prod_dev"
         assert root["targets"]["prod"]["variables"]["dest_catalog"] == "main_prod"
 
+    def test_dev_stages_apart_from_prod(self) -> None:
+        # With the dev catalog fallback both targets can share a catalog, so the
+        # staging schema must differ for gateway and integrated CDC volumes.
+        files = build_bundle(_plan(_item()), "acme", dev_catalog="main_prod")
+        root = _load(files, "databricks.yml")
+        dev, prod = root["targets"]["dev"]["variables"], root["targets"]["prod"]["variables"]
+        assert dev["staging_catalog"] == "main_prod"
+        assert dev["staging_schema"] == "ingestion_staging_dev"
+        assert "staging_schema" not in prod
+        assert root["variables"]["staging_schema"]["default"] == "ingestion_staging"
+        assert "`ingestion_staging_dev`" in files["README.md"]
+
     def test_dev_catalog_can_be_overridden(self) -> None:
         files = build_bundle(_plan(_item()), "acme", dev_catalog="sandbox")
         root = _load(files, "databricks.yml")

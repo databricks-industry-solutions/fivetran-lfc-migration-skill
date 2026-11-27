@@ -42,6 +42,7 @@ PROD_ROOT_PATH = (
 )
 
 DEV_SCHEMA_SUFFIX = "_dev"
+STAGING_SCHEMA = "ingestion_staging"
 _SCHEMA_SUFFIX_VAR = "${var.schema_suffix}"
 
 _MANUAL_CONNECTION_NOTE = (
@@ -162,6 +163,10 @@ def _root(
             spec["workspace"] = workspace
         spec["variables"] = {"dest_catalog": dest_catalog}
         if schema_suffix:
+            # Dev stages in its own catalog and schema too, so dev and prod never
+            # share a gateway or integrated CDC staging volume, even in one catalog.
+            spec["variables"]["staging_catalog"] = dest_catalog
+            spec["variables"]["staging_schema"] = f"{STAGING_SCHEMA}{schema_suffix}"
             spec["variables"]["schema_suffix"] = schema_suffix
         return spec
 
@@ -179,7 +184,7 @@ def _root(
             },
             "staging_schema": {
                 "description": "Schema holding gateway and integrated CDC staging volumes",
-                "default": "ingestion_staging",
+                "default": STAGING_SCHEMA,
             },
             "schema_suffix": {
                 "description": "Appended to every destination schema; dev sets _dev",
@@ -616,7 +621,8 @@ def _bundle_readme(
         ),
         (
             f"- The dev target writes to `<schema>{DEV_SCHEMA_SUFFIX}` (`schema_suffix`), so a "
-            "dev run never writes into the schemas prod uses."
+            "dev run never writes into the schemas prod uses, and stages in "
+            f"`{STAGING_SCHEMA}{DEV_SCHEMA_SUFFIX}`, so dev and prod never share a staging volume."
         ),
     ]
 

@@ -407,7 +407,8 @@ even with `--force`, unless `--keep-existing-resources` is passed. With
 bundle already deploys a pipeline under that name, and warns when a bundle with
 the same name was already deployed. It never binds existing pipelines.
 The `dev` target writes to `<schema>_dev` (a `schema_suffix` bundle variable;
-if the dev catalog does not exist, dev uses the target catalog),
+if the dev catalog does not exist, dev uses the target catalog) and stages in
+`ingestion_staging_dev`,
 and with `--databricks-profile` the bundle README lists destination tables that
 already exist and are owned by another pipeline, with that pipeline's bundle.
 

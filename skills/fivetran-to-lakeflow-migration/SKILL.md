@@ -610,7 +610,9 @@ again.
 
 The `dev` target writes to its own schemas: the bundle sets a `schema_suffix`
 variable (empty by default, `_dev` in `dev`), so a dev pipeline for
-`pagerduty` writes to `pagerduty_dev` and never to the prod schema. With
+`pagerduty` writes to `pagerduty_dev` and never to the prod schema. Dev also
+stages in `ingestion_staging_dev`, so dev and prod never share a gateway or
+integrated CDC staging volume, even in one catalog. With
 `--databricks-profile`, the generator also lists the tables in each dev and
 prod destination schema (`databricks tables list <catalog> <schema>
 --omit-columns`), reads the owner of each streaming table from its
