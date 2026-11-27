@@ -629,7 +629,11 @@ def _bundle_readme(
     if summary["gateways_required"]:
         lines.append(
             "- Gateways run continuously on classic compute and are billed even when the "
-            "ingestion pipeline is idle."
+            "ingestion pipeline is idle. A gateway must keep `continuous: true`, and "
+            "`mode: development` pauses jobs, not pipelines, so dev mode does not stop a "
+            "gateway: once started it reads the source until stopped. Stopping it "
+            "(`databricks pipelines stop <pipeline_id>`) can drop source changes and force "
+            "a full refresh."
         )
 
     if kept_resources:

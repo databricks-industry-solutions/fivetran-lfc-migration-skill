@@ -211,6 +211,13 @@ class TestGatewayPipeline:
         assert gateway["continuous"] is True
         assert gateway["serverless"] is False
 
+    def test_readme_says_dev_mode_does_not_stop_the_gateway(self, files: dict[str, str]) -> None:
+        # Gateways must stay continuous and dev mode pauses only jobs, so the
+        # README must not suggest a dev deploy leaves the gateway idle.
+        readme = files["README.md"]
+        assert "`mode: development` pauses jobs, not pipelines" in readme
+        assert "`databricks pipelines stop <pipeline_id>`" in readme
+
     def test_gateway_declares_its_staging_storage(self, files: dict[str, str]) -> None:
         gateway = _load(files, "resources/sales_abc_gateway.pipeline.yml")["resources"][
             "pipelines"

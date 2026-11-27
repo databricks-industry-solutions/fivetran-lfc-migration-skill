@@ -671,6 +671,14 @@ Generated jobs never set `pause_status`: `mode: development` pauses every dev
 schedule and trigger, so a dev sync happens only through an approved `bundle
 run`, and prod jobs start `UNPAUSED` once the customer confirms the prod deploy.
 
+Gateways are the exception: a gateway must keep `continuous: true`, and
+`mode: development` pauses jobs, not pipelines, so it never stops a gateway.
+Once started, a gateway reads the source on classic compute until stopped.
+For gateway connections, never say a deploy runs nothing: the deploy and run
+approvals say the gateway runs continuously from then on. Stopping it
+(`databricks pipelines stop <pipeline_id>`) is its own approval, since a
+stopped gateway can miss source changes and need a full refresh.
+
 Then the customer cuts over in this order (do not compress it):
 
 1. Deploy to `dev` and let one full sync complete.
